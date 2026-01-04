@@ -7,8 +7,4 @@ python-dotenv==1.0.0
 cryptography==41.0.4
 PyJWT==2.8.0
 numpy==1.24.3
-pandas==2.0.3
-boto3==1.28.45
 gunicorn==21.2.0
-python-multipart==0.0.6
-email-validator==2.0.0
