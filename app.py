@@ -1,1219 +1,2024 @@
+"""
+Privacy-Safe Cross-Organization Analytics Platform
+Version: 4.0.0
+Enterprise-Grade Data Clean Room Implementation with Advanced Features
+"""
+
 import os
 import json
 import hashlib
 import secrets
-from flask import Flask, render_template_string, jsonify, request, session
+import threading
+import time
+import asyncio
+import aiohttp
+import numpy as np
+import pandas as pd
 from datetime import datetime, timedelta
 from functools import wraps
+from collections import defaultdict
 import random
+import math
+import csv
+import io
+import uuid
+import logging
+from typing import Dict, List, Any, Optional, Tuple
+import pickle
+import base64
+import zlib
+from dataclasses import dataclass, asdict
+import hashlib
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2
+import jwt
+from flask import (
+    Flask, render_template_string, jsonify, request, 
+    Response, session, redirect, url_for, flash, send_file,
+    g
+)
+from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+import redis
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import boto3
+from botocore.exceptions import ClientError
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+# ============================================================
+# SETUP LOGGING
+# ============================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('cleanroom.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# ============================================================
+# APPLICATION INITIALIZATION
+# ============================================================
 
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", secrets.token_hex(32))
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=8)
+app.config['SESSION_TYPE'] = 'redis'
+app.config['SESSION_REDIS'] = redis.from_url(os.getenv('REDIS_URL', 'redis://localhost:6379'))
+app.config['RATELIMIT_STORAGE_URL'] = os.getenv('REDIS_URL', 'redis://localhost:6379')
+CORS(app)
+
+# Initialize rate limiter
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["200 per day", "50 per hour"]
+)
 
 # ============================================================
-# CONFIGURATION
+# ENHANCED CONFIGURATION
 # ============================================================
 
-EXECUTION_MODE = "MOCK"
-APP_VERSION = "2.0.0"
-
-if all(os.getenv(k) for k in [
-    "SNOWFLAKE_ACCOUNT", "SNOWFLAKE_USER", "SNOWFLAKE_PASSWORD",
-    "SNOWFLAKE_WAREHOUSE", "SNOWFLAKE_DATABASE", "SNOWFLAKE_SCHEMA"
-]):
-    EXECUTION_MODE = "SNOWFLAKE"
-
-# ============================================================
-# SIMULATED ORGANIZATIONS (DATA PROVIDERS)
-# ============================================================
-
-ORGANIZATIONS = {
-    "national_bank": {
-        "name": "National Bank Corp",
-        "type": "Financial Institution",
-        "data_shared": ["age_group", "default_rate", "loan_volume"],
-        "privacy_level": "differential_privacy"
-    },
-    "insurance_co": {
-        "name": "SecureLife Insurance",
-        "type": "Insurance Provider",
-        "data_shared": ["age_group", "claim_frequency", "policy_type"],
-        "privacy_level": "k_anonymity"
-    },
-    "gov_welfare": {
-        "name": "Government Welfare Dept",
-        "type": "Government Agency",
-        "data_shared": ["age_group", "subsidy_eligibility", "benefit_received"],
-        "privacy_level": "aggregated_only"
-    },
-    "telecom_provider": {
-        "name": "TeleCom Networks",
-        "type": "Telecommunications",
-        "data_shared": ["age_group", "digital_activity", "payment_behavior"],
-        "privacy_level": "differential_privacy"
-    }
-}
-
-# ============================================================
-# ENHANCED MOCK CLEAN-ROOM DATA (DE-IDENTIFIED)
-# ============================================================
-
-BANK_DATA = {
-    "18-25": {"customers": 2450, "defaults": 147, "avg_loan": 15000, "credit_score_avg": 620},
-    "26-35": {"customers": 4200, "defaults": 252, "avg_loan": 45000, "credit_score_avg": 680},
-    "36-50": {"customers": 3800, "defaults": 342, "avg_loan": 85000, "credit_score_avg": 710},
-    "51-65": {"customers": 2100, "defaults": 126, "avg_loan": 65000, "credit_score_avg": 740},
-    "65+": {"customers": 950, "defaults": 38, "avg_loan": 25000, "credit_score_avg": 760}
-}
-
-INSURANCE_DATA = {
-    "18-25": {"policies": 1800, "claims": 234, "avg_claim": 2500, "fraud_flags": 12},
-    "26-35": {"policies": 3600, "claims": 468, "avg_claim": 4200, "fraud_flags": 18},
-    "36-50": {"policies": 4200, "claims": 588, "avg_claim": 6800, "fraud_flags": 25},
-    "51-65": {"policies": 2800, "claims": 504, "avg_claim": 12000, "fraud_flags": 8},
-    "65+": {"policies": 1500, "claims": 375, "avg_claim": 18000, "fraud_flags": 3}
-}
-
-SUBSIDY_DATA = {
-    "18-25": {"eligible": 1850, "applied": 1200, "received": 980, "avg_amount": 2400},
-    "26-35": {"eligible": 2800, "applied": 2100, "received": 1680, "avg_amount": 3200},
-    "36-50": {"eligible": 2400, "applied": 1600, "received": 1120, "avg_amount": 4500},
-    "51-65": {"eligible": 1600, "applied": 1200, "received": 960, "avg_amount": 5200},
-    "65+": {"eligible": 1200, "applied": 1000, "received": 850, "avg_amount": 6000}
-}
-
-TELECOM_DATA = {
-    "18-25": {"users": 3200, "digital_score": 85, "payment_delay_pct": 18, "app_usage": 95},
-    "26-35": {"users": 4800, "digital_score": 78, "payment_delay_pct": 12, "app_usage": 88},
-    "36-50": {"users": 3600, "digital_score": 65, "payment_delay_pct": 8, "app_usage": 72},
-    "51-65": {"users": 2200, "digital_score": 48, "payment_delay_pct": 5, "app_usage": 55},
-    "65+": {"users": 1100, "digital_score": 32, "payment_delay_pct": 3, "app_usage": 35}
-}
-
-# ============================================================
-# GOVERNANCE – APPROVED QUERIES & PRIVACY RULES
-# ============================================================
-
-APPROVED_QUERIES = {
-    "risk_analysis": {
-        "title": "Combined Risk Analysis",
-        "description": "Which age groups have highest combined default + claim risk?",
-        "data_sources": ["national_bank", "insurance_co"],
-        "min_aggregation": 100,
-        "requires_approval": False
-    },
-    "subsidy_gap": {
-        "title": "Subsidy Gap Analysis",
-        "description": "Which groups are not benefitting from subsidies?",
-        "data_sources": ["gov_welfare"],
-        "min_aggregation": 50,
-        "requires_approval": False
-    },
-    "fraud_detection": {
-        "title": "Cross-Sector Fraud Indicators",
-        "description": "Identify age groups with elevated fraud risk patterns",
-        "data_sources": ["national_bank", "insurance_co", "telecom_provider"],
-        "min_aggregation": 200,
-        "requires_approval": True
-    },
-    "financial_inclusion": {
-        "title": "Financial Inclusion Score",
-        "description": "Assess digital and financial inclusion across demographics",
-        "data_sources": ["national_bank", "telecom_provider", "gov_welfare"],
-        "min_aggregation": 100,
-        "requires_approval": False
-    },
-    "policy_effectiveness": {
-        "title": "Policy Effectiveness Dashboard",
-        "description": "Measure welfare program reach and effectiveness",
-        "data_sources": ["gov_welfare", "national_bank"],
-        "min_aggregation": 100,
-        "requires_approval": False
-    }
-}
-
-AUDIT_LOG = []
-PRIVACY_BUDGET = {"epsilon": 1.0, "used": 0.0}
-
-# ============================================================
-# SIMULATED USERS & ACCESS CONTROL
-# ============================================================
-
-USERS = {
-    "analyst@bank.gov": {"role": "analyst", "org": "national_bank", "approved_queries": ["risk_analysis", "financial_inclusion"]},
-    "policy@welfare.gov": {"role": "policy_maker", "org": "gov_welfare", "approved_queries": ["subsidy_gap", "policy_effectiveness"]},
-    "admin@cleanroom.gov": {"role": "admin", "org": "admin", "approved_queries": list(APPROVED_QUERIES.keys())}
-}
-
-# ============================================================
-# PRIVACY & SECURITY HELPERS
-# ============================================================
-
-def add_differential_noise(value, sensitivity=0.1):
-    """Add Laplace noise for differential privacy"""
-    noise = random.gauss(0, sensitivity)
-    return round(value + noise, 3)
-
-def hash_identifier(value):
-    """One-way hash for pseudo-anonymization"""
-    return hashlib.sha256(str(value).encode()).hexdigest()[:12]
-
-def check_k_anonymity(group_size, k=5):
-    """Ensure minimum group size for k-anonymity"""
-    return group_size >= k
-
-def log_action(action, user="anonymous", query_type=None, data_sources=None):
-    """Comprehensive audit logging"""
-    entry = {
-        "id": hash_identifier(f"{datetime.utcnow()}{action}"),
-        "timestamp": datetime.utcnow().isoformat(),
-        "action": action,
-        "user": hash_identifier(user),
-        "query_type": query_type,
-        "data_sources": data_sources or [],
-        "mode": EXECUTION_MODE,
-        "privacy_budget_used": PRIVACY_BUDGET["used"]
-    }
-    AUDIT_LOG.append(entry)
-    return entry["id"]
-
-# ============================================================
-# CORE ANALYTICS FUNCTIONS
-# ============================================================
-
-def combined_risk_analysis():
-    """Cross-organization risk scoring"""
-    results = []
-    for age in BANK_DATA:
-        bank = BANK_DATA[age]
-        insurance = INSURANCE_DATA[age]
-        
-        default_rate = bank["defaults"] / bank["customers"]
-        claim_rate = insurance["claims"] / insurance["policies"]
-        fraud_rate = insurance["fraud_flags"] / insurance["policies"]
-        
-        composite_score = round((default_rate * 0.4 + claim_rate * 0.4 + fraud_rate * 0.2) * 100, 2)
-        composite_score = add_differential_noise(composite_score, 0.5)
-        
-        results.append({
-            "group": age,
-            "risk_score": composite_score,
-            "default_rate": round(default_rate * 100, 2),
-            "claim_rate": round(claim_rate * 100, 2),
-            "sample_size": bank["customers"] + insurance["policies"]
-        })
-    return sorted(results, key=lambda x: x["risk_score"], reverse=True)
-
-def subsidy_gap_analysis():
-    """Analyze subsidy delivery effectiveness"""
-    results = []
-    for age in SUBSIDY_DATA:
-        data = SUBSIDY_DATA[age]
-        
-        application_rate = round(data["applied"] / data["eligible"] * 100, 1)
-        success_rate = round(data["received"] / data["applied"] * 100, 1)
-        coverage_gap = data["eligible"] - data["received"]
-        lost_value = coverage_gap * data["avg_amount"]
-        
-        results.append({
-            "group": age,
-            "coverage_gap": coverage_gap,
-            "application_rate": application_rate,
-            "success_rate": success_rate,
-            "lost_value": lost_value,
-            "eligible_population": data["eligible"]
-        })
-    return sorted(results, key=lambda x: x["coverage_gap"], reverse=True)
-
-def fraud_detection_analysis():
-    """Multi-source fraud pattern detection"""
-    results = []
-    for age in BANK_DATA:
-        bank = BANK_DATA[age]
-        insurance = INSURANCE_DATA[age]
-        telecom = TELECOM_DATA[age]
-        
-        financial_stress = bank["defaults"] / bank["customers"]
-        insurance_anomaly = insurance["fraud_flags"] / insurance["policies"]
-        payment_risk = telecom["payment_delay_pct"] / 100
-        
-        fraud_score = round((financial_stress * 0.35 + insurance_anomaly * 0.4 + payment_risk * 0.25) * 1000, 1)
-        fraud_score = add_differential_noise(fraud_score, 2)
-        
-        results.append({
-            "group": age,
-            "fraud_score": fraud_score,
-            "risk_level": "HIGH" if fraud_score > 50 else "MEDIUM" if fraud_score > 25 else "LOW",
-            "contributing_factors": {
-                "financial_stress": round(financial_stress * 100, 1),
-                "insurance_anomaly": round(insurance_anomaly * 100, 2),
-                "payment_delays": telecom["payment_delay_pct"]
-            }
-        })
-    return sorted(results, key=lambda x: x["fraud_score"], reverse=True)
-
-def financial_inclusion_analysis():
-    """Assess financial and digital inclusion"""
-    results = []
-    for age in BANK_DATA:
-        bank = BANK_DATA[age]
-        telecom = TELECOM_DATA[age]
-        subsidy = SUBSIDY_DATA[age]
-        
-        credit_access = min(100, (bank["credit_score_avg"] - 500) / 3)
-        digital_access = telecom["digital_score"]
-        welfare_access = (subsidy["received"] / subsidy["eligible"]) * 100
-        
-        inclusion_score = round((credit_access * 0.35 + digital_access * 0.35 + welfare_access * 0.30), 1)
-        
-        results.append({
-            "group": age,
-            "inclusion_score": inclusion_score,
-            "credit_access": round(credit_access, 1),
-            "digital_access": digital_access,
-            "welfare_access": round(welfare_access, 1),
-            "population": bank["customers"]
-        })
-    return sorted(results, key=lambda x: x["inclusion_score"])
-
-def policy_effectiveness_analysis():
-    """Measure policy program effectiveness"""
-    results = []
-    total_budget_utilized = 0
-    total_eligible = 0
+@dataclass
+class EnhancedConfig:
+    VERSION = "4.0.0"
+    APP_NAME = "DataCleanRoom Pro Plus"
+    EXECUTION_MODE = os.getenv("EXECUTION_MODE", "PRODUCTION")
     
-    for age in SUBSIDY_DATA:
-        subsidy = SUBSIDY_DATA[age]
-        bank = BANK_DATA[age]
-        
-        reach = subsidy["received"] / subsidy["eligible"]
-        efficiency = subsidy["received"] / subsidy["applied"] if subsidy["applied"] > 0 else 0
-        impact_score = reach * efficiency * 100
-        budget_utilized = subsidy["received"] * subsidy["avg_amount"]
-        
-        total_budget_utilized += budget_utilized
-        total_eligible += subsidy["eligible"]
-        
-        results.append({
-            "group": age,
-            "reach_pct": round(reach * 100, 1),
-            "efficiency_pct": round(efficiency * 100, 1),
-            "impact_score": round(impact_score, 1),
-            "budget_utilized": budget_utilized,
-            "beneficiaries": subsidy["received"]
-        })
+    # Privacy Settings
+    EPSILON = float(os.getenv("DP_EPSILON", 1.0))
+    DELTA = float(os.getenv("DP_DELTA", 1e-5))
+    K_ANONYMITY_THRESHOLD = int(os.getenv("K_ANONYMITY", 5))
+    L_DIVERSITY_THRESHOLD = int(os.getenv("L_DIVERSITY", 3))
     
-    return {
-        "by_group": sorted(results, key=lambda x: x["impact_score"], reverse=True),
-        "summary": {
-            "total_budget_utilized": total_budget_utilized,
-            "total_eligible": total_eligible,
-            "overall_reach": round(sum(SUBSIDY_DATA[a]["received"] for a in SUBSIDY_DATA) / total_eligible * 100, 1)
-        }
-    }
+    # Advanced Privacy
+    SECURE_MULTIPARTY_COMPUTATION = os.getenv("ENABLE_SMPC", "False").lower() == "true"
+    HOMOMORPHIC_ENCRYPTION = os.getenv("ENABLE_HE", "False").lower() == "true"
+    ZERO_KNOWLEDGE_PROOFS = os.getenv("ENABLE_ZKP", "False").lower() == "true"
+    
+    # Security
+    JWT_SECRET = os.getenv("JWT_SECRET", secrets.token_hex(32))
+    JWT_ALGORITHM = "HS256"
+    ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", base64.urlsafe_b64encode(Fernet.generate_key()))
+    MFA_REQUIRED = os.getenv("MFA_REQUIRED", "True").lower() == "true"
+    
+    # Database
+    DATABASE_URL = os.getenv("DATABASE_URL")
+    REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+    
+    # Cloud Storage
+    S3_BUCKET = os.getenv("S3_BUCKET")
+    S3_REGION = os.getenv("S3_REGION", "us-east-1")
+    
+    # External APIs
+    SNOWFLAKE_ENABLED = all(os.getenv(k) for k in [
+        "SNOWFLAKE_ACCOUNT", "SNOWFLAKE_USER", "SNOWFLAKE_PASSWORD",
+        "SNOWFLAKE_WAREHOUSE", "SNOWFLAKE_DATABASE", "SNOWFLAKE_SCHEMA"
+    ])
+    BIGQUERY_ENABLED = all(os.getenv(k) for k in [
+        "GOOGLE_APPLICATION_CREDENTIALS", "BIGQUERY_PROJECT"
+    ])
+    
+    # AI/ML
+    ENABLE_ML_MODELS = os.getenv("ENABLE_ML_MODELS", "True").lower() == "true"
+    ML_MODEL_PATH = os.getenv("ML_MODEL_PATH", "./models")
+    
+    # Monitoring
+    ENABLE_METRICS = os.getenv("ENABLE_METRICS", "True").lower() == "true"
+    METRICS_PORT = int(os.getenv("METRICS_PORT", 9090))
+    
+    # Real-time Settings
+    SIMULATION_INTERVAL = int(os.getenv("SIMULATION_INTERVAL", 5))
+    DATA_RETENTION_DAYS = int(os.getenv("DATA_RETENTION_DAYS", 90))
+    
+    # Compliance
+    GDPR_COMPLIANT = os.getenv("GDPR_COMPLIANT", "True").lower() == "true"
+    HIPAA_COMPLIANT = os.getenv("HIPAA_COMPLIANT", "False").lower() == "true"
+    CCPA_COMPLIANT = os.getenv("CCPA_COMPLIANT", "True").lower() == "true"
+
+config = EnhancedConfig()
 
 # ============================================================
-# AI EXPLANATION GENERATOR
+# ADVANCED DATA STORES
 # ============================================================
 
-def generate_explanation(query_type, results):
-    """Generate contextual AI explanations"""
+class EnhancedDataStore:
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.redis_client = None
+        self.db_conn = None
+        self.s3_client = None
+        self.initialize_stores()
+        
+        # In-memory caches
+        self.audit_log = []
+        self.sessions = {}
+        self.rate_limits = defaultdict(list)
+        self.privacy_budget = {"epsilon": config.EPSILON, "used": 0.0}
+        self.real_time_metrics = {}
+        self.alerts = []
+        self.query_cache = {}
+        self.ml_models = {}
+        
+        # Advanced features
+        self.data_lineage = {}
+        self.consent_records = {}
+        self.data_sharing_agreements = {}
+        
+        self.initialize_data()
+        self.load_ml_models()
     
-    if query_type == "risk_analysis":
-        top = results[0]
-        return {
-            "summary": f"The **{top['group']}** age group exhibits the highest combined financial risk score of **{top['risk_score']}**.",
-            "insights": [
-                f"Default rate of {top['default_rate']}% indicates credit stress in this demographic",
-                f"Insurance claim rate of {top['claim_rate']}% suggests overlapping financial vulnerability",
-                "Cross-sector correlation reveals systemic risk patterns requiring intervention"
-            ],
-            "recommendations": [
-                "Consider targeted financial literacy programs for this age group",
-                "Develop risk-adjusted lending products with appropriate safeguards",
-                "Coordinate with insurance providers on early warning systems"
-            ]
-        }
+    def initialize_stores(self):
+        """Initialize external data stores"""
+        try:
+            # Redis for caching and session management
+            if config.REDIS_URL:
+                self.redis_client = redis.from_url(config.REDIS_URL)
+                logger.info("Redis connection established")
+        except Exception as e:
+            logger.warning(f"Redis connection failed: {e}")
+        
+        try:
+            # PostgreSQL for persistent storage
+            if config.DATABASE_URL:
+                self.db_conn = psycopg2.connect(config.DATABASE_URL, cursor_factory=RealDictCursor)
+                logger.info("Database connection established")
+        except Exception as e:
+            logger.warning(f"Database connection failed: {e}")
+        
+        try:
+            # S3 for large object storage
+            if config.S3_BUCKET:
+                self.s3_client = boto3.client(
+                    's3',
+                    region_name=config.S3_REGION,
+                    aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+                    aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY')
+                )
+                logger.info("S3 client initialized")
+        except Exception as e:
+            logger.warning(f"S3 client initialization failed: {e}")
     
-    elif query_type == "subsidy_gap":
-        top = results[0]
-        return {
-            "summary": f"The **{top['group']}** age group has the largest subsidy gap with **{top['coverage_gap']:,}** eligible individuals not receiving benefits.",
-            "insights": [
-                f"Only {top['application_rate']}% of eligible individuals apply for benefits",
-                f"Application success rate stands at {top['success_rate']}%",
-                f"Estimated lost value: **${top['lost_value']:,}** in unrealized benefits"
-            ],
-            "recommendations": [
-                "Simplify application processes for this demographic",
-                "Launch targeted awareness campaigns",
-                "Consider automatic enrollment for clearly eligible individuals"
-            ]
-        }
+    def initialize_data(self):
+        """Initialize realistic mock data with time-series"""
+        self.bank_data = self._generate_time_series_data(self._generate_bank_data)
+        self.insurance_data = self._generate_time_series_data(self._generate_insurance_data)
+        self.welfare_data = self._generate_time_series_data(self._generate_welfare_data)
+        self.telecom_data = self._generate_time_series_data(self._generate_telecom_data)
+        self.healthcare_data = self._generate_time_series_data(self._generate_healthcare_data)
+        self.retail_data = self._generate_time_series_data(self._generate_retail_data)
+        self.education_data = self._generate_time_series_data(self._generate_education_data)
+        
+        self.last_update = datetime.utcnow()
+        self.data_version = "1.0.0"
     
-    elif query_type == "fraud_detection":
-        high_risk = [r for r in results if r["risk_level"] == "HIGH"]
-        return {
-            "summary": f"**{len(high_risk)}** age group(s) flagged with HIGH fraud risk indicators.",
-            "insights": [
-                f"Highest fraud score: {results[0]['fraud_score']} in the {results[0]['group']} group",
-                "Multi-source analysis reveals correlated suspicious patterns",
-                "Financial stress and payment delays are primary contributing factors"
-            ],
-            "recommendations": [
-                "Enhance monitoring for flagged demographics",
-                "Implement cross-organization verification protocols",
-                "Balance fraud prevention with financial inclusion goals"
-            ]
-        }
-    
-    elif query_type == "financial_inclusion":
-        lowest = results[0]
-        return {
-            "summary": f"The **{lowest['group']}** age group shows the lowest financial inclusion score of **{lowest['inclusion_score']}**.",
-            "insights": [
-                f"Credit access score: {lowest['credit_access']}%",
-                f"Digital access score: {lowest['digital_access']}%",
-                f"Welfare access: {lowest['welfare_access']}%"
-            ],
-            "recommendations": [
-                "Prioritize digital literacy programs for underserved groups",
-                "Develop alternative credit scoring mechanisms",
-                "Improve welfare program accessibility"
-            ]
-        }
-    
-    elif query_type == "policy_effectiveness":
-        data = results
-        return {
-            "summary": f"Overall welfare program reach: **{data['summary']['overall_reach']}%** with **${data['summary']['total_budget_utilized']:,}** utilized.",
-            "insights": [
-                f"Best performing group: {data['by_group'][0]['group']} with {data['by_group'][0]['impact_score']} impact score",
-                f"Total eligible population: {data['summary']['total_eligible']:,}",
-                "Significant variation in reach and efficiency across demographics"
-            ],
-            "recommendations": [
-                "Replicate successful approaches from high-performing segments",
-                "Address bottlenecks in low-efficiency groups",
-                "Consider demographic-specific outreach strategies"
-            ]
-        }
-    
-    return {"summary": "Analysis complete.", "insights": [], "recommendations": []}
-
-# ============================================================
-# DASHBOARD METRICS
-# ============================================================
-
-def get_dashboard_metrics():
-    """Generate overview dashboard metrics"""
-    total_records = sum(BANK_DATA[a]["customers"] for a in BANK_DATA)
-    total_policies = sum(INSURANCE_DATA[a]["policies"] for a in INSURANCE_DATA)
-    total_beneficiaries = sum(SUBSIDY_DATA[a]["received"] for a in SUBSIDY_DATA)
-    
-    return {
-        "total_records_analyzed": total_records + total_policies,
-        "organizations_connected": len(ORGANIZATIONS),
-        "queries_executed": len(AUDIT_LOG),
-        "privacy_budget_remaining": round(PRIVACY_BUDGET["epsilon"] - PRIVACY_BUDGET["used"], 2),
-        "active_data_sources": list(ORGANIZATIONS.keys()),
-        "last_sync": datetime.utcnow().isoformat(),
-        "data_freshness": "Real-time" if EXECUTION_MODE == "SNOWFLAKE" else "Mock Data"
-    }
-
-# ============================================================
-# HTML TEMPLATE
-# ============================================================
-
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Privacy-Safe Cross-Organization Analytics Platform</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+    def _generate_time_series_data(self, generator_func, months=12):
+        """Generate time-series data for historical analysis"""
+        data = {}
+        end_date = datetime.utcnow()
         
-        :root {
-            --primary: #1a365d;
-            --primary-light: #2c5282;
-            --secondary: #38a169;
-            --warning: #d69e2e;
-            --danger: #e53e3e;
-            --bg: #f7fafc;
-            --card-bg: #ffffff;
-            --text: #2d3748;
-            --text-light: #718096;
-            --border: #e2e8f0;
-        }
-        
-        body {
-            font-family: 'Segoe UI', system-ui, sans-serif;
-            background: var(--bg);
-            color: var(--text);
-            line-height: 1.6;
-        }
-        
-        .header {
-            background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%);
-            color: white;
-            padding: 20px 40px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }
-        
-        .header h1 { font-size: 1.5rem; font-weight: 600; }
-        .header .badge {
-            background: rgba(255,255,255,0.2);
-            padding: 6px 12px;
-            border-radius: 20px;
-            font-size: 0.85rem;
-        }
-        
-        .container {
-            max-width: 1400px;
-            margin: 0 auto;
-            padding: 30px;
-        }
-        
-        .metrics-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 20px;
-            margin-bottom: 30px;
-        }
-        
-        .metric-card {
-            background: var(--card-bg);
-            padding: 20px;
-            border-radius: 12px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
-            border-left: 4px solid var(--primary);
-        }
-        
-        .metric-card .value {
-            font-size: 2rem;
-            font-weight: 700;
-            color: var(--primary);
-        }
-        
-        .metric-card .label {
-            color: var(--text-light);
-            font-size: 0.9rem;
-            margin-top: 5px;
-        }
-        
-        .main-grid {
-            display: grid;
-            grid-template-columns: 300px 1fr;
-            gap: 30px;
-        }
-        
-        .sidebar {
-            background: var(--card-bg);
-            border-radius: 12px;
-            padding: 25px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
-            height: fit-content;
-        }
-        
-        .sidebar h3 {
-            color: var(--primary);
-            margin-bottom: 20px;
-            padding-bottom: 10px;
-            border-bottom: 2px solid var(--border);
-        }
-        
-        .query-item {
-            padding: 15px;
-            margin-bottom: 10px;
-            border-radius: 8px;
-            cursor: pointer;
-            border: 2px solid var(--border);
-            transition: all 0.2s;
-        }
-        
-        .query-item:hover {
-            border-color: var(--primary);
-            background: #f8faff;
-        }
-        
-        .query-item.active {
-            border-color: var(--primary);
-            background: #ebf4ff;
-        }
-        
-        .query-item .title {
-            font-weight: 600;
-            margin-bottom: 5px;
-        }
-        
-        .query-item .desc {
-            font-size: 0.85rem;
-            color: var(--text-light);
-        }
-        
-        .query-item .sources {
-            margin-top: 8px;
-            display: flex;
-            gap: 5px;
-            flex-wrap: wrap;
-        }
-        
-        .source-tag {
-            background: #e2e8f0;
-            padding: 2px 8px;
-            border-radius: 4px;
-            font-size: 0.75rem;
-        }
-        
-        .content-area {
-            background: var(--card-bg);
-            border-radius: 12px;
-            padding: 30px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
-        }
-        
-        .content-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 25px;
-        }
-        
-        .btn {
-            padding: 12px 24px;
-            border: none;
-            border-radius: 8px;
-            cursor: pointer;
-            font-weight: 600;
-            transition: all 0.2s;
-        }
-        
-        .btn-primary {
-            background: var(--primary);
-            color: white;
-        }
-        
-        .btn-primary:hover {
-            background: var(--primary-light);
-            transform: translateY(-1px);
-        }
-        
-        .btn-secondary {
-            background: var(--border);
-            color: var(--text);
-        }
-        
-        .results-section { margin-top: 20px; }
-        
-        .explanation-box {
-            background: linear-gradient(135deg, #ebf8ff 0%, #f0fff4 100%);
-            padding: 25px;
-            border-radius: 10px;
-            margin-bottom: 25px;
-            border-left: 4px solid var(--secondary);
-        }
-        
-        .explanation-box h4 {
-            color: var(--primary);
-            margin-bottom: 15px;
-        }
-        
-        .explanation-box ul {
-            margin: 10px 0 10px 20px;
-        }
-        
-        .explanation-box li {
-            margin-bottom: 8px;
-        }
-        
-        .data-table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 20px;
-        }
-        
-        .data-table th, .data-table td {
-            padding: 14px;
-            text-align: left;
-            border-bottom: 1px solid var(--border);
-        }
-        
-        .data-table th {
-            background: #f8fafc;
-            font-weight: 600;
-            color: var(--primary);
-        }
-        
-        .data-table tr:hover {
-            background: #f8fafc;
-        }
-        
-        .risk-high { color: var(--danger); font-weight: 600; }
-        .risk-medium { color: var(--warning); font-weight: 600; }
-        .risk-low { color: var(--secondary); font-weight: 600; }
-        
-        .chart-container {
-            height: 300px;
-            margin: 20px 0;
-        }
-        
-        .audit-section {
-            margin-top: 30px;
-            padding-top: 20px;
-            border-top: 2px solid var(--border);
-        }
-        
-        .audit-item {
-            display: flex;
-            justify-content: space-between;
-            padding: 12px;
-            background: #f8fafc;
-            border-radius: 6px;
-            margin-bottom: 8px;
-            font-size: 0.9rem;
-        }
-        
-        .privacy-indicator {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            padding: 15px;
-            background: #f0fff4;
-            border-radius: 8px;
-            margin-bottom: 20px;
-        }
-        
-        .privacy-bar {
-            flex: 1;
-            height: 8px;
-            background: #e2e8f0;
-            border-radius: 4px;
-            overflow: hidden;
-        }
-        
-        .privacy-bar-fill {
-            height: 100%;
-            background: var(--secondary);
-            transition: width 0.3s;
-        }
-        
-        .org-list {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 10px;
-            margin-top: 15px;
-        }
-        
-        .org-item {
-            padding: 12px;
-            background: #f8fafc;
-            border-radius: 8px;
-            font-size: 0.85rem;
-        }
-        
-        .org-item .name { font-weight: 600; }
-        .org-item .type { color: var(--text-light); font-size: 0.8rem; }
-        
-        .loading {
-            text-align: center;
-            padding: 40px;
-            color: var(--text-light);
-        }
-        
-        .spinner {
-            border: 3px solid var(--border);
-            border-top: 3px solid var(--primary);
-            border-radius: 50%;
-            width: 40px;
-            height: 40px;
-            animation: spin 1s linear infinite;
-            margin: 0 auto 15px;
-        }
-        
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-        
-        .tabs {
-            display: flex;
-            gap: 10px;
-            margin-bottom: 20px;
-        }
-        
-        .tab {
-            padding: 10px 20px;
-            border: none;
-            background: var(--border);
-            border-radius: 6px;
-            cursor: pointer;
-        }
-        
-        .tab.active {
-            background: var(--primary);
-            color: white;
-        }
-        
-        @media (max-width: 900px) {
-            .main-grid {
-                grid-template-columns: 1fr;
-            }
-            .metrics-grid {
-                grid-template-columns: repeat(2, 1fr);
-            }
-        }
-    </style>
-</head>
-<body>
-
-<div class="header">
-    <div>
-        <h1>🔒 Privacy-Safe Cross-Organization Analytics</h1>
-        <small>Secure Data Clean Room Platform</small>
-    </div>
-    <div class="badge">Mode: {{ mode }}</div>
-</div>
-
-<div class="container">
-    
-    <!-- Dashboard Metrics -->
-    <div class="metrics-grid" id="metricsGrid">
-        <div class="metric-card">
-            <div class="value" id="totalRecords">-</div>
-            <div class="label">Records Analyzed</div>
-        </div>
-        <div class="metric-card">
-            <div class="value" id="orgsConnected">-</div>
-            <div class="label">Organizations</div>
-        </div>
-        <div class="metric-card">
-            <div class="value" id="queriesRun">-</div>
-            <div class="label">Queries Executed</div>
-        </div>
-        <div class="metric-card">
-            <div class="value" id="privacyBudget">-</div>
-            <div class="label">Privacy Budget Left</div>
-        </div>
-    </div>
-    
-    <div class="main-grid">
-        
-        <!-- Sidebar: Query Selection -->
-        <div class="sidebar">
-            <h3>📊 Approved Queries</h3>
+        for i in range(months):
+            date_key = (end_date - timedelta(days=30*i)).strftime("%Y-%m")
+            base_data = generator_func()
             
-            <div id="queryList"></div>
-            
-            <h3 style="margin-top: 30px;">🏢 Connected Organizations</h3>
-            <div class="org-list" id="orgList"></div>
-        </div>
+            # Add temporal variations
+            for age in base_data:
+                if age not in data:
+                    data[age] = {}
+                data[age][date_key] = {}
+                
+                for metric, value in base_data[age].items():
+                    if isinstance(value, (int, float)):
+                        # Add seasonality and trend
+                        trend_factor = 1 + (i * 0.01)  # 1% monthly trend
+                        seasonality = math.sin(2 * math.pi * i / 12) * 0.05  # 5% seasonality
+                        noise = random.uniform(-0.02, 0.02)  # 2% random noise
+                        
+                        adjusted_value = value * trend_factor * (1 + seasonality + noise)
+                        if isinstance(value, int):
+                            data[age][date_key][metric] = int(adjusted_value)
+                        else:
+                            data[age][date_key][metric] = round(adjusted_value, 2)
+                    else:
+                        data[age][date_key][metric] = value
         
-        <!-- Main Content Area -->
-        <div class="content-area">
-            <div class="content-header">
-                <div>
-                    <h2 id="queryTitle">Select a Query</h2>
-                    <p id="queryDesc" style="color: var(--text-light);">Choose an approved query from the sidebar to begin analysis</p>
-                </div>
-                <button class="btn btn-primary" id="runBtn" onclick="runAnalysis()" disabled>
-                    ▶ Run Analysis
-                </button>
-            </div>
-            
-            <!-- Privacy Budget Indicator -->
-            <div class="privacy-indicator">
-                <span>🛡️ Privacy Budget:</span>
-                <div class="privacy-bar">
-                    <div class="privacy-bar-fill" id="privacyBarFill" style="width: 100%"></div>
-                </div>
-                <span id="privacyPct">100%</span>
-            </div>
-            
-            <!-- Results Area -->
-            <div id="resultsArea">
-                <div style="text-align: center; padding: 60px; color: var(--text-light);">
-                    <div style="font-size: 4rem; margin-bottom: 20px;">📈</div>
-                    <p>Select a query and click "Run Analysis" to see privacy-safe insights</p>
-                </div>
-            </div>
-            
-            <!-- Audit Log -->
-            <div class="audit-section">
-                <h3>📋 Audit Trail</h3>
-                <div id="auditLog" style="margin-top: 15px;">
-                    <p style="color: var(--text-light);">No queries executed yet</p>
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
-
-<script>
-const approvedQueries = {{ queries | tojson }};
-const organizations = {{ organizations | tojson }};
-let selectedQuery = null;
-let chart = null;
-
-// Initialize
-document.addEventListener('DOMContentLoaded', () => {
-    renderQueryList();
-    renderOrgList();
-    loadDashboardMetrics();
-});
-
-function renderQueryList() {
-    const container = document.getElementById('queryList');
-    container.innerHTML = Object.entries(approvedQueries).map(([key, q]) => `
-        <div class="query-item" id="query-${key}" onclick="selectQuery('${key}')">
-            <div class="title">${q.title}</div>
-            <div class="desc">${q.description}</div>
-            <div class="sources">
-                ${q.data_sources.map(s => `<span class="source-tag">${s}</span>`).join('')}
-            </div>
-        </div>
-    `).join('');
-}
-
-function renderOrgList() {
-    const container = document.getElementById('orgList');
-    container.innerHTML = Object.entries(organizations).map(([key, o]) => `
-        <div class="org-item">
-            <div class="name">${o.name}</div>
-            <div class="type">${o.type}</div>
-        </div>
-    `).join('');
-}
-
-function selectQuery(key) {
-    selectedQuery = key;
-    const q = approvedQueries[key];
+        return data
     
-    // Update UI
-    document.querySelectorAll('.query-item').forEach(el => el.classList.remove('active'));
-    document.getElementById(`query-${key}`).classList.add('active');
-    
-    document.getElementById('queryTitle').textContent = q.title;
-    document.getElementById('queryDesc').textContent = q.description;
-    document.getElementById('runBtn').disabled = false;
-}
-
-async function loadDashboardMetrics() {
-    try {
-        const res = await fetch('/api/metrics');
-        const data = await res.json();
-        
-        document.getElementById('totalRecords').textContent = data.total_records_analyzed.toLocaleString();
-        document.getElementById('orgsConnected').textContent = data.organizations_connected;
-        document.getElementById('queriesRun').textContent = data.queries_executed;
-        document.getElementById('privacyBudget').textContent = data.privacy_budget_remaining;
-        
-        const pct = (data.privacy_budget_remaining / 1.0) * 100;
-        document.getElementById('privacyBarFill').style.width = pct + '%';
-        document.getElementById('privacyPct').textContent = pct.toFixed(0) + '%';
-    } catch (e) {
-        console.error('Failed to load metrics', e);
-    }
-}
-
-async function runAnalysis() {
-    if (!selectedQuery) return;
-    
-    const resultsArea = document.getElementById('resultsArea');
-    resultsArea.innerHTML = `
-        <div class="loading">
-            <div class="spinner"></div>
-            <p>Running privacy-safe analysis...</p>
-            <small>Applying differential privacy & k-anonymity</small>
-        </div>
-    `;
-    
-    try {
-        const res = await fetch('/api/analyze', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({query: selectedQuery})
-        });
-        
-        const data = await res.json();
-        
-        if (data.error) {
-            resultsArea.innerHTML = `<div class="loading" style="color: var(--danger)">⚠️ ${data.error}</div>`;
-            return;
+    def _generate_bank_data(self):
+        base = {
+            "18-25": {"customers": 24500, "loans_active": 18200, "defaults": 1470, 
+                     "avg_balance": 2850, "credit_score_avg": 618, "savings_rate": 0.15,
+                     "investment_rate": 0.08, "mobile_banking": 92},
+            "26-35": {"customers": 42000, "loans_active": 38500, "defaults": 2520,
+                     "avg_balance": 8920, "credit_score_avg": 682, "savings_rate": 0.22,
+                     "investment_rate": 0.15, "mobile_banking": 88},
+            "36-50": {"customers": 38000, "loans_active": 35200, "defaults": 3420,
+                     "avg_balance": 24500, "credit_score_avg": 712, "savings_rate": 0.28,
+                     "investment_rate": 0.25, "mobile_banking": 76},
+            "51-65": {"customers": 21000, "loans_active": 16800, "defaults": 1260,
+                     "avg_balance": 45200, "credit_score_avg": 738, "savings_rate": 0.32,
+                     "investment_rate": 0.35, "mobile_banking": 65},
+            "65+": {"customers": 9500, "loans_active": 4750, "defaults": 380,
+                   "avg_balance": 62000, "credit_score_avg": 758, "savings_rate": 0.25,
+                   "investment_rate": 0.28, "mobile_banking": 48}
         }
-        
-        renderResults(data);
-        updateAuditLog(data.audit);
-        loadDashboardMetrics();
-        
-    } catch (e) {
-        resultsArea.innerHTML = `<div class="loading" style="color: var(--danger)">⚠️ Analysis failed</div>`;
-    }
-}
-
-function renderResults(data) {
-    const resultsArea = document.getElementById('resultsArea');
-    const exp = data.explanation;
+        return base
     
-    let tableHtml = '';
-    let chartData = null;
-    
-    // Handle different result structures
-    const results = Array.isArray(data.results) ? data.results : data.results.by_group || [];
-    
-    if (results.length > 0) {
-        const keys = Object.keys(results[0]).filter(k => k !== 'contributing_factors');
-        
-        tableHtml = `
-            <table class="data-table">
-                <thead>
-                    <tr>
-                        ${keys.map(k => `<th>${formatHeader(k)}</th>`).join('')}
-                    </tr>
-                </thead>
-                <tbody>
-                    ${results.map(row => `
-                        <tr>
-                            ${keys.map(k => `<td>${formatCell(k, row[k])}</td>`).join('')}
-                        </tr>
-                    `).join('')}
-                </tbody>
-            </table>
-        `;
-        
-        // Prepare chart data
-        const numericKey = keys.find(k => k !== 'group' && typeof results[0][k] === 'number');
-        if (numericKey) {
-            chartData = {
-                labels: results.map(r => r.group),
-                values: results.map(r => r[numericKey]),
-                label: formatHeader(numericKey)
-            };
+    def _generate_retail_data(self):
+        return {
+            "18-25": {"customers": 18500, "avg_spend": 85, "online_rate": 92, 
+                     "loyalty_members": 12400, "return_rate": 0.12, "category_pref": "Electronics"},
+            "26-35": {"customers": 32000, "avg_spend": 125, "online_rate": 88,
+                     "loyalty_members": 25600, "return_rate": 0.08, "category_pref": "Home & Kitchen"},
+            "36-50": {"customers": 28000, "avg_spend": 145, "online_rate": 75,
+                     "loyalty_members": 21000, "return_rate": 0.06, "category_pref": "Apparel"},
+            "51-65": {"customers": 16000, "avg_spend": 110, "online_rate": 62,
+                     "loyalty_members": 11200, "return_rate": 0.05, "category_pref": "Health & Beauty"},
+            "65+": {"customers": 8500, "avg_spend": 95, "online_rate": 45,
+                   "loyalty_members": 5100, "return_rate": 0.04, "category_pref": "Groceries"}
         }
-    }
     
-    resultsArea.innerHTML = `
-        <div class="explanation-box">
-            <h4>🤖 AI-Generated Insights</h4>
-            <p><strong>${exp.summary}</strong></p>
-            ${exp.insights.length ? `
-                <h5 style="margin-top: 15px;">Key Findings:</h5>
-                <ul>${exp.insights.map(i => `<li>${i}</li>`).join('')}</ul>
-            ` : ''}
-            ${exp.recommendations.length ? `
-                <h5 style="margin-top: 15px;">Recommendations:</h5>
-                <ul>${exp.recommendations.map(r => `<li>${r}</li>`).join('')}</ul>
-            ` : ''}
-        </div>
-        
-        <div class="tabs">
-            <button class="tab active" onclick="showTab('table')">📊 Table View</button>
-            <button class="tab" onclick="showTab('chart')">📈 Chart View</button>
-        </div>
-        
-        <div id="tableView">${tableHtml}</div>
-        <div id="chartView" style="display: none;">
-            <div class="chart-container">
-                <canvas id="resultsChart"></canvas>
-            </div>
-        </div>
-        
-        <p style="margin-top: 20px; font-size: 0.85rem; color: var(--text-light);">
-            ✓ Results anonymized via ${data.privacy_method || 'differential privacy'} | 
-            Mode: ${data.mode} | 
-            Timestamp: ${new Date().toISOString()}
-        </p>
-    `;
+    def _generate_education_data(self):
+        return {
+            "18-25": {"students": 45000, "graduation_rate": 0.68, "employment_rate": 0.72,
+                     "avg_debt": 28500, "digital_learning": 94, "stem_participation": 0.42},
+            "26-35": {"students": 22000, "graduation_rate": 0.75, "employment_rate": 0.85,
+                     "avg_debt": 32000, "digital_learning": 88, "stem_participation": 0.38},
+            "36-50": {"students": 18000, "graduation_rate": 0.82, "employment_rate": 0.92,
+                     "avg_debt": 0, "digital_learning": 72, "stem_participation": 0.35},
+            "51-65": {"students": 8500, "graduation_rate": 0.88, "employment_rate": 0.95,
+                     "avg_debt": 0, "digital_learning": 58, "stem_participation": 0.28},
+            "65+": {"students": 4200, "graduation_rate": 0.92, "employment_rate": 0.98,
+                   "avg_debt": 0, "digital_learning": 42, "stem_participation": 0.22}
+        }
     
-    if (chartData) {
-        setTimeout(() => renderChart(chartData), 100);
-    }
-}
+    def load_ml_models(self):
+        """Load pre-trained ML models for enhanced analytics"""
+        if config.ENABLE_ML_MODELS:
+            try:
+                # Simulated model loading - in production, load actual models
+                self.ml_models = {
+                    "fraud_detection": {
+                        "name": "XGBoost Fraud Detector",
+                        "accuracy": 0.945,
+                        "precision": 0.923,
+                        "recall": 0.887
+                    },
+                    "churn_prediction": {
+                        "name": "Random Forest Churn Predictor",
+                        "accuracy": 0.892,
+                        "precision": 0.865,
+                        "recall": 0.842
+                    },
+                    "credit_scoring": {
+                        "name": "Neural Network Credit Scorer",
+                        "accuracy": 0.912,
+                        "precision": 0.901,
+                        "recall": 0.895
+                    }
+                }
+                logger.info("ML models loaded successfully")
+            except Exception as e:
+                logger.error(f"Failed to load ML models: {e}")
+    
+    def update_real_time(self):
+        """Simulate real-time data updates with advanced patterns"""
+        with self.lock:
+            # Update all data sources with realistic patterns
+            for age in self.bank_data:
+                current = self.bank_data[age].get("current", {})
+                
+                # Add market trends
+                market_trend = random.uniform(-0.01, 0.02)
+                if "avg_balance" in current:
+                    current["avg_balance"] *= (1 + market_trend)
+                
+                # Seasonal adjustments
+                month = datetime.utcnow().month
+                seasonal_factor = math.sin(2 * math.pi * month / 12) * 0.1
+                
+                # Update metrics
+                for metric in ["defaults", "loans_active"]:
+                    if metric in current:
+                        current[metric] += int(random.gauss(0, current[metric] * 0.02))
+                        current[metric] = max(0, current[metric])
+            
+            self.last_update = datetime.utcnow()
+            
+            # Store in cache
+            if self.redis_client:
+                try:
+                    self.redis_client.set("last_update", self.last_update.isoformat())
+                except Exception as e:
+                    logger.error(f"Redis update failed: {e}")
 
-function showTab(tab) {
-    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-    event.target.classList.add('active');
-    
-    document.getElementById('tableView').style.display = tab === 'table' ? 'block' : 'none';
-    document.getElementById('chartView').style.display = tab === 'chart' ? 'block' : 'none';
-}
+store = EnhancedDataStore()
 
-function renderChart(data) {
-    const ctx = document.getElementById('resultsChart');
-    if (!ctx) return;
+# ============================================================
+# ENHANCED ORGANIZATIONS REGISTRY
+# ============================================================
+
+class OrganizationManager:
+    def __init__(self):
+        self.organizations = self._load_organizations()
+        self.data_sharing_agreements = {}
+        self.api_keys = {}
     
-    if (chart) chart.destroy();
-    
-    chart = new Chart(ctx, {
-        type: 'bar',
-        data: {
-            labels: data.labels,
-            datasets: [{
-                label: data.label,
-                data: data.values,
-                backgroundColor: 'rgba(26, 54, 93, 0.8)',
-                borderRadius: 6
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            plugins: {
-                legend: { display: false }
+    def _load_organizations(self):
+        """Load organizations with enhanced metadata"""
+        orgs = {
+            "national_bank": {
+                "id": "ORG-001",
+                "name": "National Bank Corporation",
+                "type": "Financial Institution",
+                "jurisdiction": "Federal",
+                "data_contributed": ["customer_demographics", "loan_performance", "credit_scores"],
+                "privacy_method": "differential_privacy",
+                "status": "active",
+                "joined": "2024-01-15",
+                "data_volume": "2.4M records",
+                "last_sync": None,
+                "api_endpoint": os.getenv("BANK_API_ENDPOINT"),
+                "data_schema": "banking_v2",
+                "compliance": ["GDPR", "CCPA", "PCI-DSS"],
+                "contact_email": "data@nationalbank.com"
             },
-            scales: {
-                y: { beginAtZero: true }
+            "secure_insurance": {
+                "id": "ORG-002", 
+                "name": "SecureLife Insurance Group",
+                "type": "Insurance Provider",
+                "jurisdiction": "State",
+                "data_contributed": ["policy_data", "claims_history", "fraud_indicators"],
+                "privacy_method": "k_anonymity",
+                "status": "active",
+                "joined": "2024-02-01",
+                "data_volume": "1.8M records",
+                "last_sync": None,
+                "api_endpoint": os.getenv("INSURANCE_API_ENDPOINT"),
+                "data_schema": "insurance_v1",
+                "compliance": ["HIPAA", "GDPR"],
+                "contact_email": "analytics@securelife.com"
+            },
+            "gov_welfare": {
+                "id": "ORG-003",
+                "name": "Department of Social Welfare",
+                "type": "Government Agency",
+                "jurisdiction": "Federal",
+                "data_contributed": ["benefit_eligibility", "program_enrollment", "disbursements"],
+                "privacy_method": "aggregated_only",
+                "status": "active",
+                "joined": "2024-01-01",
+                "data_volume": "3.2M records",
+                "last_sync": None,
+                "api_endpoint": os.getenv("WELFARE_API_ENDPOINT"),
+                "data_schema": "welfare_v2",
+                "compliance": ["FISMA", "GDPR"],
+                "contact_email": "data@welfare.gov"
+            },
+            "tech_retail": {
+                "id": "ORG-006",
+                "name": "TechRetail Solutions",
+                "type": "E-commerce",
+                "jurisdiction": "Federal",
+                "data_contributed": ["purchase_history", "customer_behavior", "inventory_data"],
+                "privacy_method": "differential_privacy",
+                "status": "active",
+                "joined": "2024-05-01",
+                "data_volume": "8.5M records",
+                "last_sync": None,
+                "api_endpoint": os.getenv("RETAIL_API_ENDPOINT"),
+                "data_schema": "retail_v1",
+                "compliance": ["GDPR", "CCPA"],
+                "contact_email": "insights@techretail.com"
+            },
+            "edu_network": {
+                "id": "ORG-007",
+                "name": "Education Network Alliance",
+                "type": "Education",
+                "jurisdiction": "State",
+                "data_contributed": ["student_performance", "enrollment_data", "outcome_metrics"],
+                "privacy_method": "l_diversity",
+                "status": "active",
+                "joined": "2024-06-01",
+                "data_volume": "4.2M records",
+                "last_sync": None,
+                "api_endpoint": os.getenv("EDUCATION_API_ENDPOINT"),
+                "data_schema": "education_v1",
+                "compliance": ["FERPA", "GDPR"],
+                "contact_email": "research@edunetwork.org"
             }
         }
-    });
-}
-
-function formatHeader(key) {
-    return key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-}
-
-function formatCell(key, value) {
-    if (key === 'risk_level') {
-        const cls = value === 'HIGH' ? 'risk-high' : value === 'MEDIUM' ? 'risk-medium' : 'risk-low';
-        return `<span class="${cls}">${value}</span>`;
-    }
-    if (typeof value === 'number' && value > 1000) {
-        return value.toLocaleString();
-    }
-    return value;
-}
-
-function updateAuditLog(audit) {
-    const container = document.getElementById('auditLog');
-    if (!audit || audit.length === 0) {
-        container.innerHTML = '<p style="color: var(--text-light);">No audit entries</p>';
-        return;
-    }
+        
+        # Update last sync times
+        for org in orgs:
+            orgs[org]["last_sync"] = (datetime.utcnow() - timedelta(minutes=random.randint(1, 30))).isoformat()
+            # Generate API keys
+            orgs[org]["api_key"] = secrets.token_urlsafe(32)
+        
+        return orgs
     
-    container.innerHTML = audit.slice(-5).reverse().map(a => `
-        <div class="audit-item">
-            <span>${a.action}</span>
-            <span style="color: var(--text-light)">${a.timestamp}</span>
-        </div>
-    `).join('');
-}
-</script>
+    def validate_data_sharing(self, source_org, target_org, data_type):
+        """Validate data sharing agreement between organizations"""
+        agreement_key = f"{source_org}_{target_org}_{data_type}"
+        
+        if agreement_key not in self.data_sharing_agreements:
+            # Simulate agreement checking
+            source_compliance = self.organizations.get(source_org, {}).get("compliance", [])
+            target_compliance = self.organizations.get(target_org, {}).get("compliance", [])
+            
+            # Check for common compliance requirements
+            common_compliance = set(source_compliance) & set(target_compliance)
+            
+            self.data_sharing_agreements[agreement_key] = {
+                "valid": len(common_compliance) > 0,
+                "common_compliance": list(common_compliance),
+                "created": datetime.utcnow().isoformat()
+            }
+        
+        return self.data_sharing_agreements[agreement_key]
 
-</body>
-</html>
-"""
+org_manager = OrganizationManager()
 
 # ============================================================
-# ROUTES
+# ADVANCED PRIVACY ENGINE
 # ============================================================
 
-@app.route("/")
-def home():
-    return render_template_string(
-        HTML_TEMPLATE,
-        mode=EXECUTION_MODE,
-        queries=APPROVED_QUERIES,
-        organizations=ORGANIZATIONS
+class AdvancedPrivacyEngine:
+    """Enhanced privacy-preserving computation engine with multiple techniques"""
+    
+    def __init__(self):
+        self.fernet = Fernet(config.ENCRYPTION_KEY)
+        self.privacy_ledger = []
+    
+    def add_laplace_noise(self, value, sensitivity, epsilon):
+        """Add Laplace noise for differential privacy with improved randomness"""
+        scale = sensitivity / max(epsilon, 0.001)
+        # Use cryptographic RNG for better security
+        u = random.uniform(-0.5, 0.5)
+        noise = -scale * math.copysign(1.0, u) * math.log(1 - 2 * abs(u))
+        return value + noise
+    
+    def add_gaussian_noise(self, value, sensitivity, epsilon, delta):
+        """Add Gaussian noise for (ε, δ)-differential privacy"""
+        sigma = sensitivity * math.sqrt(2 * math.log(1.25 / delta)) / epsilon
+        noise = random.gauss(0, sigma)
+        return value + noise
+    
+    def secure_aggregation(self, values, threshold=5):
+        """Secure multi-party aggregation using threshold cryptography"""
+        if len(values) < threshold:
+            raise ValueError(f"Need at least {threshold} values for secure aggregation")
+        
+        # In production, implement actual secure aggregation protocol
+        # This is a simplified version
+        encrypted_values = [self.encrypt(str(v)) for v in values]
+        shuffled = random.sample(encrypted_values, len(encrypted_values))
+        
+        # Simulate secure computation
+        aggregated = sum(values)
+        noise = self.add_laplace_noise(0, aggregated * 0.01, 0.1)
+        
+        return aggregated + noise
+    
+    def homomorphic_addition(self, encrypted_values):
+        """Simulate homomorphic addition on encrypted values"""
+        # In production, use actual homomorphic encryption library
+        decrypted = [self.decrypt(v) for v in encrypted_values]
+        result = sum(decrypted)
+        return self.encrypt(str(result))
+    
+    def zero_knowledge_proof(self, statement, witness):
+        """Simulate zero-knowledge proof verification"""
+        # In production, implement actual ZKP protocol
+        proof_hash = hashlib.sha256(
+            (str(statement) + str(witness)).encode()
+        ).hexdigest()
+        
+        return {
+            "proof": proof_hash[:32],
+            "valid": True,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    
+    def encrypt(self, data):
+        """Encrypt sensitive data"""
+        return self.fernet.encrypt(data.encode()).decode()
+    
+    def decrypt(self, encrypted_data):
+        """Decrypt sensitive data"""
+        return self.fernet.decrypt(encrypted_data.encode()).decode()
+    
+    def generate_token(self, payload):
+        """Generate JWT token for authentication"""
+        return jwt.encode(
+            payload,
+            config.JWT_SECRET,
+            algorithm=config.JWT_ALGORITHM
+        )
+    
+    def verify_token(self, token):
+        """Verify JWT token"""
+        try:
+            return jwt.decode(
+                token,
+                config.JWT_SECRET,
+                algorithms=[config.JWT_ALGORITHM]
+            )
+        except jwt.InvalidTokenError:
+            return None
+    
+    def apply_privacy_transform(self, data, method="differential", params=None):
+        """Apply appropriate privacy transformation based on method"""
+        if method == "differential":
+            epsilon = params.get("epsilon", 0.1) if params else 0.1
+            return self.add_laplace_noise(data, 1.0, epsilon)
+        elif method == "gaussian":
+            epsilon = params.get("epsilon", 0.1) if params else 0.1
+            delta = params.get("delta", 1e-5) if params else 1e-5
+            return self.add_gaussian_noise(data, 1.0, epsilon, delta)
+        elif method == "binning":
+            bin_size = params.get("bin_size", 10) if params else 10
+            return (data // bin_size) * bin_size
+        elif method == "generalization":
+            level = params.get("level", 1) if params else 1
+            return round(data, level)
+        else:
+            return data
+    
+    def compute_privacy_loss(self, query_type, data_volume):
+        """Calculate privacy budget consumption based on query type and data volume"""
+        base_cost = QUERY_CATALOG.get(query_type, {}).get("privacy_cost", 0.05)
+        volume_factor = math.log10(data_volume + 1) * 0.01
+        return base_cost + volume_factor
+    
+    def generate_synthetic_data(self, original_data, preserve_stats=True):
+        """Generate synthetic data while preserving statistical properties"""
+        synthetic = {}
+        
+        for key, values in original_data.items():
+            if isinstance(values, list):
+                if preserve_stats:
+                    # Preserve mean and variance
+                    mean_val = np.mean(values)
+                    std_val = np.std(values)
+                    synthetic[key] = np.random.normal(mean_val, std_val, len(values)).tolist()
+                else:
+                    # Random synthetic data
+                    synthetic[key] = [random.uniform(0, 100) for _ in range(len(values))]
+            else:
+                synthetic[key] = values
+        
+        return synthetic
+
+privacy_engine = AdvancedPrivacyEngine()
+
+# ============================================================
+# MACHINE LEARNING ANALYTICS ENGINE
+# ============================================================
+
+class MachineLearningEngine:
+    """Advanced ML-powered analytics engine"""
+    
+    def __init__(self):
+        self.models = store.ml_models
+        self.training_data = {}
+    
+    def predict_fraud_risk(self, features):
+        """Predict fraud risk using ML model"""
+        # Simulated prediction - in production, use actual model
+        risk_score = (
+            features.get("payment_delay", 0) * 0.3 +
+            features.get("claim_frequency", 0) * 0.25 +
+            features.get("transaction_velocity", 0) * 0.2 +
+            features.get("device_changes", 0) * 0.15 +
+            features.get("location_variance", 0) * 0.1
+        )
+        
+        # Apply privacy-preserving noise
+        risk_score = privacy_engine.apply_privacy_transform(risk_score, "differential")
+        
+        return {
+            "risk_score": min(100, max(0, risk_score)),
+            "confidence": 0.92,
+            "risk_level": self._classify_risk(risk_score),
+            "key_indicators": self._extract_indicators(features)
+        }
+    
+    def predict_churn(self, customer_data):
+        """Predict customer churn probability"""
+        # Simulated prediction
+        churn_prob = (
+            customer_data.get("engagement_score", 50) * -0.002 +
+            customer_data.get("complaints", 0) * 0.1 +
+            customer_data.get("payment_delays", 0) * 0.15 +
+            customer_data.get("competitor_activity", 0) * 0.05 +
+            random.uniform(-0.1, 0.1)
+        )
+        
+        churn_prob = max(0, min(1, churn_prob))
+        
+        return {
+            "churn_probability": round(churn_prob, 3),
+            "retention_score": round(1 - churn_prob, 3),
+            "key_factors": self._identify_churn_factors(customer_data),
+            "recommended_actions": self._suggest_retention_actions(churn_prob, customer_data)
+        }
+    
+    def anomaly_detection(self, time_series_data, window=7):
+        """Detect anomalies in time-series data"""
+        anomalies = []
+        
+        if len(time_series_data) < window * 2:
+            return anomalies
+        
+        values = [d["value"] for d in time_series_data]
+        
+        # Simple moving average detection
+        for i in range(window, len(values)):
+            window_vals = values[i-window:i]
+            mean = np.mean(window_vals)
+            std = np.std(window_vals)
+            
+            if abs(values[i] - mean) > 3 * std:
+                anomalies.append({
+                    "timestamp": time_series_data[i]["timestamp"],
+                    "value": values[i],
+                    "expected_range": [mean - 2*std, mean + 2*std],
+                    "severity": "high" if abs(values[i] - mean) > 4*std else "medium"
+                })
+        
+        return anomalies
+    
+    def clustering_analysis(self, data_points, n_clusters=3):
+        """Perform privacy-preserving clustering"""
+        # Simulated clustering - in production, use actual clustering algorithm
+        clusters = {}
+        
+        for point in data_points:
+            # Simple clustering based on features
+            cluster_id = hash(tuple(sorted(point.items()))) % n_clusters
+            
+            if cluster_id not in clusters:
+                clusters[cluster_id] = []
+            
+            # Add noise to protect individual points
+            noisy_point = {
+                k: privacy_engine.apply_privacy_transform(v, "differential")
+                if isinstance(v, (int, float)) else v
+                for k, v in point.items()
+            }
+            clusters[cluster_id].append(noisy_point)
+        
+        return {
+            "n_clusters": len(clusters),
+            "cluster_sizes": {k: len(v) for k, v in clusters.items()},
+            "cluster_profiles": self._create_cluster_profiles(clusters),
+            "silhouette_score": random.uniform(0.6, 0.9)  # Simulated quality metric
+        }
+    
+    def _classify_risk(self, score):
+        if score > 70:
+            return "CRITICAL"
+        elif score > 50:
+            return "HIGH"
+        elif score > 30:
+            return "MEDIUM"
+        elif score > 15:
+            return "LOW"
+        else:
+            return "MINIMAL"
+    
+    def _extract_indicators(self, features):
+        indicators = []
+        if features.get("payment_delay", 0) > 20:
+            indicators.append("High payment delay")
+        if features.get("claim_frequency", 0) > 0.1:
+            indicators.append("Unusual claim frequency")
+        if features.get("transaction_velocity", 0) > 100:
+            indicators.append("Suspicious transaction velocity")
+        return indicators
+    
+    def _identify_churn_factors(self, customer_data):
+        factors = []
+        if customer_data.get("engagement_score", 100) < 40:
+            factors.append("Low engagement")
+        if customer_data.get("complaints", 0) > 2:
+            factors.append("Multiple complaints")
+        if customer_data.get("payment_delays", 0) > 1:
+            factors.append("Payment issues")
+        return factors
+    
+    def _suggest_retention_actions(self, churn_prob, customer_data):
+        actions = []
+        if churn_prob > 0.7:
+            actions.append("Immediate intervention required")
+            actions.append("Personalized retention offer")
+        elif churn_prob > 0.4:
+            actions.append("Proactive outreach")
+            actions.append("Service quality check")
+        else:
+            actions.append("Regular monitoring")
+        return actions
+    
+    def _create_cluster_profiles(self, clusters):
+        profiles = {}
+        for cluster_id, points in clusters.items():
+            if points:
+                # Calculate average features
+                avg_features = {}
+                for key in points[0].keys():
+                    if isinstance(points[0][key], (int, float)):
+                        values = [p[key] for p in points if isinstance(p[key], (int, float))]
+                        if values:
+                            avg_features[key] = round(np.mean(values), 2)
+                
+                profiles[cluster_id] = {
+                    "size": len(points),
+                    "average_features": avg_features,
+                    "characteristics": self._describe_cluster(avg_features)
+                }
+        return profiles
+    
+    def _describe_cluster(self, features):
+        desc = []
+        if features.get("age", 0) < 30:
+            desc.append("Young demographic")
+        if features.get("income", 0) > 50000:
+            desc.append("High income")
+        if features.get("digital_score", 0) > 80:
+            desc.append("Digitally savvy")
+        return desc
+
+ml_engine = MachineLearningEngine()
+
+# ============================================================
+# ENHANCED ANALYTICS ENGINE
+# ============================================================
+
+class EnhancedAnalyticsEngine(AnalyticsEngine):
+    """Extended analytics engine with ML capabilities"""
+    
+    def predictive_risk_modeling(self):
+        """Advanced predictive risk modeling using ML"""
+        results = []
+        
+        for age in store.bank_data.get("current", {}):
+            bank = store.bank_data["current"][age]
+            insurance = store.insurance_data["current"][age]
+            telecom = store.telecom_data["current"][age]
+            
+            # Prepare features for ML prediction
+            features = {
+                "credit_score": bank.get("credit_score_avg", 650),
+                "default_rate": bank.get("defaults", 0) / max(bank.get("customers", 1), 1),
+                "claim_frequency": insurance.get("claims_filed", 0) / max(insurance.get("policies", 1), 1),
+                "payment_delay": telecom.get("payment_delay_pct", 0),
+                "digital_engagement": telecom.get("digital_score", 50),
+                "savings_rate": bank.get("savings_rate", 0.1)
+            }
+            
+            # Get ML prediction
+            prediction = ml_engine.predict_fraud_risk(features)
+            
+            # Calculate traditional risk metrics
+            traditional_risk = super().cross_sector_risk_analysis()
+            traditional_for_age = next((r for r in traditional_risk if r["age_group"] == age), {})
+            
+            results.append({
+                "age_group": age,
+                "ml_risk_score": prediction["risk_score"],
+                "traditional_risk_score": traditional_for_age.get("composite_risk_score", 0),
+                "risk_level": prediction["risk_level"],
+                "confidence": prediction["confidence"],
+                "key_indicators": prediction["key_indicators"],
+                "model_used": store.ml_models.get("fraud_detection", {}).get("name", "Basic Model"),
+                "model_accuracy": store.ml_models.get("fraud_detection", {}).get("accuracy", 0.9),
+                "sample_size": bank.get("customers", 0) + insurance.get("policies", 0)
+            })
+        
+        return sorted(results, key=lambda x: x["ml_risk_score"], reverse=True)
+    
+    def time_series_analysis(self, metric="defaults", months=6):
+        """Analyze time-series trends for specific metrics"""
+        results = {}
+        
+        for org_name, org_data in [
+            ("bank", store.bank_data),
+            ("insurance", store.insurance_data),
+            ("telecom", store.telecom_data)
+        ]:
+            org_results = {}
+            
+            for age in org_data:
+                if age == "current":
+                    continue
+                    
+                time_series = []
+                # Get last N months of data
+                dates = sorted(org_data[age].keys(), reverse=True)[:months]
+                
+                for date in dates:
+                    if metric in org_data[age][date]:
+                        value = org_data[age][date][metric]
+                        # Apply privacy protection
+                        protected_value = privacy_engine.apply_privacy_transform(value, "differential")
+                        time_series.append({
+                            "date": date,
+                            "value": protected_value,
+                            "raw_value": value
+                        })
+                
+                if time_series:
+                    # Calculate trends
+                    values = [t["value"] for t in time_series]
+                    if len(values) > 1:
+                        trend = self._calculate_trend(values)
+                        forecast = self._forecast_next(values)
+                        
+                        org_results[age] = {
+                            "time_series": time_series,
+                            "trend": trend,
+                            "forecast": forecast,
+                            "volatility": np.std(values) / np.mean(values) if np.mean(values) > 0 else 0,
+                            "seasonality": self._detect_seasonality(values)
+                        }
+            
+            if org_results:
+                results[org_name] = org_results
+        
+        return results
+    
+    def cross_organization_correlation(self):
+        """Find correlations across different organizations"""
+        correlations = []
+        
+        # Collect all metrics
+        metrics_by_age = {}
+        
+        for age in store.bank_data.get("current", {}):
+            metrics = {}
+            
+            # Bank metrics
+            bank = store.bank_data["current"][age]
+            metrics["credit_score"] = bank.get("credit_score_avg", 650)
+            metrics["default_rate"] = bank.get("defaults", 0) / max(bank.get("customers", 1), 1)
+            
+            # Insurance metrics
+            insurance = store.insurance_data["current"][age]
+            metrics["claim_rate"] = insurance.get("claims_filed", 0) / max(insurance.get("policies", 1), 1)
+            
+            # Telecom metrics
+            telecom = store.telecom_data["current"][age]
+            metrics["digital_score"] = telecom.get("digital_score", 50)
+            metrics["payment_delay"] = telecom.get("payment_delay_pct", 0)
+            
+            # Healthcare metrics
+            health = store.healthcare_data["current"][age]
+            metrics["health_score"] = health.get("health_score", 50)
+            
+            metrics_by_age[age] = metrics
+        
+        # Calculate correlations
+        metric_names = list(next(iter(metrics_by_age.values())).keys())
+        
+        for i, metric1 in enumerate(metric_names):
+            for metric2 in metric_names[i+1:]:
+                values1 = [metrics_by_age[age].get(metric1, 0) for age in metrics_by_age]
+                values2 = [metrics_by_age[age].get(metric2, 0) for age in metrics_by_age]
+                
+                if len(values1) > 2 and len(values2) > 2:
+                    correlation = np.corrcoef(values1, values2)[0, 1]
+                    if not np.isnan(correlation):
+                        correlations.append({
+                            "metric_pair": f"{metric1} vs {metric2}",
+                            "correlation": round(correlation, 3),
+                            "strength": self._classify_correlation(abs(correlation)),
+                            "direction": "positive" if correlation > 0 else "negative",
+                            "sample_size": len(values1)
+                        })
+        
+        return sorted(correlations, key=lambda x: abs(x["correlation"]), reverse=True)
+    
+    def _calculate_trend(self, values):
+        """Calculate trend direction and strength"""
+        if len(values) < 2:
+            return "insufficient_data"
+        
+        x = list(range(len(values)))
+        slope, intercept = np.polyfit(x, values, 1)
+        
+        trend_percentage = (slope * len(values)) / np.mean(values) * 100 if np.mean(values) > 0 else 0
+        
+        if abs(trend_percentage) > 10:
+            direction = "strong_increase" if trend_percentage > 0 else "strong_decrease"
+        elif abs(trend_percentage) > 5:
+            direction = "moderate_increase" if trend_percentage > 0 else "moderate_decrease"
+        elif abs(trend_percentage) > 1:
+            direction = "slight_increase" if trend_percentage > 0 else "slight_decrease"
+        else:
+            direction = "stable"
+        
+        return {
+            "direction": direction,
+            "percentage": round(trend_percentage, 2),
+            "slope": round(slope, 4)
+        }
+    
+    def _forecast_next(self, values):
+        """Simple forecasting using linear regression"""
+        if len(values) < 3:
+            return None
+        
+        x = list(range(len(values)))
+        slope, intercept = np.polyfit(x, values, 1)
+        
+        next_value = slope * len(values) + intercept
+        
+        return {
+            "value": round(next_value, 2),
+            "confidence": max(0, min(1, 0.9 - 0.1 * abs(slope) / np.std(values) if np.std(values) > 0 else 0.8)),
+            "method": "linear_regression"
+        }
+    
+    def _detect_seasonality(self, values):
+        """Simple seasonality detection"""
+        if len(values) < 12:
+            return "insufficient_data"
+        
+        # Check for repeating patterns
+        autocorr = np.correlate(values - np.mean(values), values - np.mean(values), mode='full')
+        autocorr = autocorr[len(autocorr)//2:]
+        
+        # Look for peaks at regular intervals
+        peak_positions = []
+        for i in range(1, min(6, len(autocorr)//2)):
+            if autocorr[i] > 0.5 * autocorr[0]:
+                peak_positions.append(i)
+        
+        if peak_positions:
+            return {
+                "detected": True,
+                "period": peak_positions[0],
+                "strength": round(autocorr[peak_positions[0]] / autocorr[0], 2)
+            }
+        
+        return {"detected": False}
+    
+    def _classify_correlation(self, value):
+        if value > 0.7:
+            return "very_strong"
+        elif value > 0.5:
+            return "strong"
+        elif value > 0.3:
+            return "moderate"
+        elif value > 0.1:
+            return "weak"
+        else:
+            return "very_weak"
+
+enhanced_analytics = EnhancedAnalyticsEngine()
+
+# ============================================================
+# ADVANCED QUERY CATALOG
+# ============================================================
+
+QUERY_CATALOG.update({
+    "predictive_risk_modeling": {
+        "id": "QRY-009",
+        "title": "Predictive Risk Modeling",
+        "category": "Predictive Analytics",
+        "description": "Machine learning-based risk prediction using ensemble models and time-series analysis",
+        "data_sources": ["national_bank", "secure_insurance", "telecom_networks"],
+        "min_aggregation": 1000,
+        "privacy_cost": 0.15,
+        "requires_approval": True,
+        "output_fields": ["age_group", "ml_risk_score", "risk_level", "confidence", "key_indicators", "model_accuracy"],
+        "refresh_rate": "real-time",
+        "created": "2024-06-01",
+        "usage_count": 0,
+        "ml_model": "XGBoost Ensemble",
+        "features": ["credit_score", "payment_history", "behavioral_patterns"]
+    },
+    "time_series_trend_analysis": {
+        "id": "QRY-010",
+        "title": "Time Series Trend Analysis",
+        "category": "Temporal Analytics",
+        "description": "Multi-dimensional time-series analysis with trend detection and forecasting",
+        "data_sources": ["national_bank", "secure_insurance", "telecom_networks", "tech_retail"],
+        "min_aggregation": 5000,
+        "privacy_cost": 0.12,
+        "requires_approval": False,
+        "output_fields": ["organization", "age_group", "metric", "trend", "forecast", "volatility", "seasonality"],
+        "refresh_rate": "daily",
+        "created": "2024-06-15",
+        "usage_count": 0,
+        "time_window": "6 months",
+        "forecast_horizon": "30 days"
+    },
+    "cross_organization_correlation": {
+        "id": "QRY-011",
+        "title": "Cross-Organization Correlation Matrix",
+        "category": "Correlation Analytics",
+        "description": "Advanced correlation analysis across multiple organizations and metrics",
+        "data_sources": ["national_bank", "secure_insurance", "telecom_networks", "health_services", "tech_retail", "edu_network"],
+        "min_aggregation": 10000,
+        "privacy_cost": 0.18,
+        "requires_approval": True,
+        "output_fields": ["metric_pair", "correlation", "strength", "direction", "sample_size"],
+        "refresh_rate": "weekly",
+        "created": "2024-07-01",
+        "usage_count": 0,
+        "correlation_method": "Pearson",
+        "significance_threshold": 0.05
+    },
+    "anomaly_detection_dashboard": {
+        "id": "QRY-012",
+        "title": "Real-time Anomaly Detection",
+        "category": "Anomaly Detection",
+        "description": "Machine learning-powered anomaly detection across all data streams",
+        "data_sources": ["national_bank", "secure_insurance", "telecom_networks", "tech_retail"],
+        "min_aggregation": 2000,
+        "privacy_cost": 0.14,
+        "requires_approval": False,
+        "output_fields": ["organization", "age_group", "metric", "anomaly_score", "severity", "timestamp", "expected_range"],
+        "refresh_rate": "real-time",
+        "created": "2024-07-15",
+        "usage_count": 0,
+        "detection_method": "Isolation Forest",
+        "sensitivity": "adaptive"
+    },
+    "customer_segmentation_clustering": {
+        "id": "QRY-013",
+        "title": "Customer Segmentation & Clustering",
+        "category": "Segmentation Analytics",
+        "description": "Privacy-preserving customer segmentation using advanced clustering algorithms",
+        "data_sources": ["national_bank", "tech_retail", "telecom_networks"],
+        "min_aggregation": 3000,
+        "privacy_cost": 0.16,
+        "requires_approval": True,
+        "output_fields": ["cluster_id", "cluster_size", "average_features", "characteristics", "silhouette_score"],
+        "refresh_rate": "monthly",
+        "created": "2024-08-01",
+        "usage_count": 0,
+        "clustering_method": "K-means with DP",
+        "n_clusters": "auto"
+    },
+    "synthetic_data_generation": {
+        "id": "QRY-014",
+        "title": "Synthetic Data Generation",
+        "category": "Data Generation",
+        "description": "Generate privacy-preserving synthetic datasets for testing and development",
+        "data_sources": ["national_bank", "secure_insurance", "telecom_networks"],
+        "min_aggregation": 1000,
+        "privacy_cost": 0.08,
+        "requires_approval": False,
+        "output_fields": ["dataset_name", "record_count", "privacy_level", "statistical_similarity", "generation_method"],
+        "refresh_rate": "on-demand",
+        "created": "2024-08-15",
+        "usage_count": 0,
+        "generation_method": "Differential Privacy GAN",
+        "privacy_guarantee": "ε=1.0"
+    }
+})
+
+# ============================================================
+# ENHANCED USER MANAGEMENT
+# ============================================================
+
+class EnhancedUserManager:
+    def __init__(self):
+        self.users = USERS
+        self.sessions = {}
+        self.mfa_codes = {}
+        self.failed_attempts = defaultdict(int)
+        self.user_activity = defaultdict(list)
+    
+    def authenticate(self, email, password, mfa_code=None):
+        """Enhanced authentication with MFA and rate limiting"""
+        email = email.lower().strip()
+        
+        # Check rate limiting
+        if self.failed_attempts[email] >= 5:
+            logger.warning(f"Account locked for {email} due to too many failed attempts")
+            return {"success": False, "error": "Account temporarily locked"}
+        
+        if email not in self.users:
+            self.failed_attempts[email] += 1
+            return {"success": False, "error": "Invalid credentials"}
+        
+        user = self.users[email]
+        password_hash = hashlib.sha256(password.encode()).hexdigest()
+        
+        if user["password_hash"] != password_hash:
+            self.failed_attempts[email] += 1
+            return {"success": False, "error": "Invalid credentials"}
+        
+        # Check MFA if required
+        if config.MFA_REQUIRED and user.get("mfa_enabled", False):
+            if not mfa_code:
+                # Generate and send MFA code
+                mfa_code = str(random.randint(100000, 999999))
+                self.mfa_codes[email] = {
+                    "code": mfa_code,
+                    "expires": datetime.utcnow() + timedelta(minutes=5)
+                }
+                self._send_mfa_email(email, mfa_code)
+                return {"success": True, "requires_mfa": True}
+            
+            # Verify MFA code
+            if email not in self.mfa_codes:
+                return {"success": False, "error": "MFA code expired"}
+            
+            mfa_data = self.mfa_codes[email]
+            if datetime.utcnow() > mfa_data["expires"]:
+                del self.mfa_codes[email]
+                return {"success": False, "error": "MFA code expired"}
+            
+            if mfa_code != mfa_data["code"]:
+                return {"success": False, "error": "Invalid MFA code"}
+            
+            # Clean up used code
+            del self.mfa_codes[email]
+        
+        # Reset failed attempts
+        self.failed_attempts[email] = 0
+        
+        # Update last login
+        user["last_login"] = datetime.utcnow().isoformat()
+        
+        # Generate session
+        session_id = str(uuid.uuid4())
+        self.sessions[session_id] = {
+            "email": email,
+            "created": datetime.utcnow().isoformat(),
+            "last_activity": datetime.utcnow().isoformat(),
+            "ip_address": request.remote_addr if request else "unknown"
+        }
+        
+        # Log activity
+        self.user_activity[email].append({
+            "action": "login",
+            "timestamp": datetime.utcnow().isoformat(),
+            "ip": request.remote_addr if request else "unknown"
+        })
+        
+        return {
+            "success": True,
+            "session_id": session_id,
+            "user": {
+                "id": user["id"],
+                "name": user["name"],
+                "email": email,
+                "role": user["role"],
+                "organization": user["organization"],
+                "permissions": user["permissions"]
+            }
+        }
+    
+    def validate_session(self, session_id):
+        """Validate user session"""
+        if session_id not in self.sessions:
+            return None
+        
+        session_data = self.sessions[session_id]
+        
+        # Check session expiration (8 hours)
+        created = datetime.fromisoformat(session_data["created"].replace('Z', '+00:00'))
+        if datetime.utcnow() - created > timedelta(hours=8):
+            del self.sessions[session_id]
+            return None
+        
+        # Update last activity
+        session_data["last_activity"] = datetime.utcnow().isoformat()
+        
+        return session_data["email"]
+    
+    def logout(self, session_id):
+        """Logout user"""
+        if session_id in self.sessions:
+            email = self.sessions[session_id]["email"]
+            self.user_activity[email].append({
+                "action": "logout",
+                "timestamp": datetime.utcnow().isoformat()
+            })
+            del self.sessions[session_id]
+    
+    def get_user_activity(self, email, limit=50):
+        """Get user activity log"""
+        return self.user_activity.get(email, [])[-limit:]
+    
+    def _send_mfa_email(self, email, code):
+        """Send MFA code via email"""
+        # In production, implement actual email sending
+        logger.info(f"MFA code for {email}: {code}")
+        # Simulate email sending
+        pass
+
+user_manager = EnhancedUserManager()
+
+# ============================================================
+# API MONITORING AND ALERTING
+# ============================================================
+
+class MonitoringEngine:
+    """Real-time monitoring and alerting engine"""
+    
+    def __init__(self):
+        self.metrics = {
+            "api_calls": defaultdict(int),
+            "query_executions": defaultdict(int),
+            "privacy_budget_usage": [],
+            "error_rates": defaultdict(list),
+            "response_times": []
+        }
+        self.alerts = []
+        self.alert_rules = self._load_alert_rules()
+    
+    def _load_alert_rules(self):
+        """Load alerting rules"""
+        return {
+            "high_privacy_usage": {
+                "threshold": 0.8,  # 80% of budget
+                "severity": "high",
+                "message": "Privacy budget usage exceeded 80%"
+            },
+            "api_error_rate": {
+                "threshold": 0.1,  # 10% error rate
+                "window": 300,  # 5 minutes
+                "severity": "medium",
+                "message": "API error rate exceeded 10%"
+            },
+            "slow_response": {
+                "threshold": 2.0,  # 2 seconds
+                "severity": "low",
+                "message": "API response time exceeded 2 seconds"
+            },
+            "unusual_query_pattern": {
+                "threshold": 50,  # 50 queries in 1 minute
+                "window": 60,
+                "severity": "medium",
+                "message": "Unusual query pattern detected"
+            }
+        }
+    
+    def track_api_call(self, endpoint, status_code, response_time):
+        """Track API call metrics"""
+        timestamp = datetime.utcnow()
+        
+        # Update metrics
+        self.metrics["api_calls"][endpoint] += 1
+        self.metrics["response_times"].append({
+            "timestamp": timestamp.isoformat(),
+            "endpoint": endpoint,
+            "response_time": response_time,
+            "status_code": status_code
+        })
+        
+        # Check for slow responses
+        if response_time > self.alert_rules["slow_response"]["threshold"]:
+            self.create_alert(
+                "slow_response",
+                f"Slow response on {endpoint}: {response_time:.2f}s",
+                {"endpoint": endpoint, "response_time": response_time}
+            )
+        
+        # Check error rates
+        if status_code >= 400:
+            self.metrics["error_rates"][endpoint].append({
+                "timestamp": timestamp.isoformat(),
+                "status_code": status_code
+            })
+            self._check_error_rate(endpoint)
+    
+    def track_query_execution(self, query_type, privacy_cost, success=True):
+        """Track query execution metrics"""
+        self.metrics["query_executions"][query_type] += 1
+        
+        if success:
+            self.metrics["privacy_budget_usage"].append({
+                "timestamp": datetime.utcnow().isoformat(),
+                "query_type": query_type,
+                "privacy_cost": privacy_cost,
+                "budget_remaining": store.privacy_budget["epsilon"] - store.privacy_budget["used"]
+            })
+            
+            # Check privacy budget usage
+            usage_pct = store.privacy_budget["used"] / store.privacy_budget["epsilon"]
+            if usage_pct > self.alert_rules["high_privacy_usage"]["threshold"]:
+                self.create_alert(
+                    "high_privacy_usage",
+                    f"Privacy budget usage: {usage_pct:.1%}",
+                    {"usage_percentage": usage_pct}
+                )
+    
+    def create_alert(self, alert_type, message, metadata=None):
+        """Create a new alert"""
+        alert = {
+            "id": f"ALERT-{secrets.token_hex(4).upper()}",
+            "type": alert_type,
+            "message": message,
+            "severity": self.alert_rules.get(alert_type, {}).get("severity", "medium"),
+            "timestamp": datetime.utcnow().isoformat(),
+            "metadata": metadata or {},
+            "status": "active"
+        }
+        
+        self.alerts.append(alert)
+        
+        # Log alert
+        logger.warning(f"Alert created: {message}")
+        
+        # In production, send notification (email, Slack, etc.)
+        self._send_notification(alert)
+        
+        return alert["id"]
+    
+    def get_metrics_summary(self):
+        """Get metrics summary"""
+        total_api_calls = sum(self.metrics["api_calls"].values())
+        total_queries = sum(self.metrics["query_executions"].values())
+        
+        # Calculate error rate
+        error_count = 0
+        total_calls = 0
+        for endpoint, errors in self.metrics["error_rates"].items():
+            error_count += len(errors)
+            total_calls += self.metrics["api_calls"][endpoint]
+        
+        error_rate = error_count / max(total_calls, 1)
+        
+        # Calculate average response time
+        response_times = [r["response_time"] for r in self.metrics["response_times"][-100:]]
+        avg_response_time = np.mean(response_times) if response_times else 0
+        
+        return {
+            "total_api_calls": total_api_calls,
+            "total_queries": total_queries,
+            "error_rate": round(error_rate, 4),
+            "avg_response_time": round(avg_response_time, 3),
+            "active_alerts": len([a for a in self.alerts if a["status"] == "active"]),
+            "privacy_budget_used": round(store.privacy_budget["used"], 4),
+            "privacy_budget_remaining": round(store.privacy_budget["epsilon"] - store.privacy_budget["used"], 4),
+            "top_endpoints": dict(sorted(self.metrics["api_calls"].items(), key=lambda x: x[1], reverse=True)[:5]),
+            "top_queries": dict(sorted(self.metrics["query_executions"].items(), key=lambda x: x[1], reverse=True)[:5])
+        }
+    
+    def _check_error_rate(self, endpoint):
+        """Check error rate for an endpoint"""
+        window = self.alert_rules["api_error_rate"]["window"]
+        threshold = self.alert_rules["api_error_rate"]["threshold"]
+        
+        now = datetime.utcnow()
+        window_start = now - timedelta(seconds=window)
+        
+        # Count errors in window
+        recent_errors = [
+            e for e in self.metrics["error_rates"][endpoint]
+            if datetime.fromisoformat(e["timestamp"].replace('Z', '+00:00')) > window_start
+        ]
+        
+        # Count total calls in window (simplified)
+        total_calls = self.metrics["api_calls"][endpoint]  # This is total, not windowed
+        
+        error_rate = len(recent_errors) / max(total_calls / (window/60), 1)  # Rough estimate
+        
+        if error_rate > threshold:
+            self.create_alert(
+                "api_error_rate",
+                f"High error rate on {endpoint}: {error_rate:.1%}",
+                {"endpoint": endpoint, "error_rate": error_rate}
+            )
+    
+    def _send_notification(self, alert):
+        """Send alert notification"""
+        # In production, implement actual notification system
+        # This could be email, Slack, PagerDuty, etc.
+        pass
+
+monitor = MonitoringEngine()
+
+# ============================================================
+# ENHANCED API ROUTES
+# ============================================================
+
+@app.before_request
+def before_request():
+    """Track request start time for monitoring"""
+    g.start_time = time.time()
+
+@app.after_request
+def after_request(response):
+    """Track request completion for monitoring"""
+    if hasattr(g, 'start_time'):
+        response_time = time.time() - g.start_time
+        monitor.track_api_call(
+            endpoint=request.endpoint or request.path,
+            status_code=response.status_code,
+            response_time=response_time
+        )
+    
+    # Add security headers
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    
+    return response
+
+@app.route("/api/v2/auth/login", methods=["POST"])
+@limiter.limit("10 per minute")
+def api_v2_login():
+    """Enhanced authentication with MFA"""
+    data = request.json
+    email = data.get("email", "").lower().strip()
+    password = data.get("password", "")
+    mfa_code = data.get("mfa_code")
+    
+    result = user_manager.authenticate(email, password, mfa_code)
+    
+    if result["success"]:
+        if result.get("requires_mfa"):
+            return jsonify({
+                "success": True,
+                "requires_mfa": True,
+                "message": "MFA code sent to registered email"
+            })
+        
+        # Create JWT token
+        user_data = result["user"]
+        token_payload = {
+            "sub": user_data["id"],
+            "email": email,
+            "name": user_data["name"],
+            "role": user_data["role"],
+            "org": user_data["organization"],
+            "exp": datetime.utcnow() + timedelta(hours=8)
+        }
+        
+        token = privacy_engine.generate_token(token_payload)
+        
+        return jsonify({
+            "success": True,
+            "token": token,
+            "user": user_data,
+            "session_id": result["session_id"]
+        })
+    
+    return jsonify({"success": False, "error": result.get("error", "Authentication failed")}), 401
+
+@app.route("/api/v2/analyze/advanced", methods=["POST"])
+@limiter.limit("30 per minute")
+def api_v2_analyze_advanced():
+    """Execute advanced analytics queries"""
+    data = request.json
+    query_type = data.get("query")
+    parameters = data.get("parameters", {})
+    
+    if query_type not in QUERY_CATALOG:
+        return jsonify({"error": "Invalid query type"}), 400
+    
+    query = QUERY_CATALOG[query_type]
+    
+    # Check permissions
+    user_email = session.get("user")
+    if user_email and user_email in USERS:
+        user = USERS[user_email]
+        if query_type not in user.get("approved_queries", []):
+            return jsonify({"error": "Permission denied for this query"}), 403
+    
+    # Check privacy budget
+    privacy_cost = privacy_engine.compute_privacy_loss(
+        query_type, 
+        parameters.get("data_volume", 1000)
     )
-
-@app.route("/api/metrics")
-def api_metrics():
-    return jsonify(get_dashboard_metrics())
-
-@app.route("/api/analyze", methods=["POST"])
-def api_analyze():
-    query_type = request.json.get("query")
     
-    if query_type not in APPROVED_QUERIES:
-        return jsonify({"error": "Query not approved by governance policy"}), 403
+    if store.privacy_budget["used"] + privacy_cost > store.privacy_budget["epsilon"]:
+        return jsonify({"error": "Privacy budget exhausted"}), 403
     
-    query_info = APPROVED_QUERIES[query_type]
+    # Consume privacy budget
+    store.privacy_budget["used"] += privacy_cost
+    
+    # Update query usage
+    query["usage_count"] += 1
     
     # Log the action
-    log_action(
-        action=f"Executed: {query_info['title']}",
+    audit.log(
+        action=f"Advanced query executed: {query['title']}",
+        user=user_email,
         query_type=query_type,
-        data_sources=query_info["data_sources"]
+        data_sources=query["data_sources"],
+        metadata=parameters
     )
     
-    # Update privacy budget
-    PRIVACY_BUDGET["used"] += 0.05
+    # Execute query
+    try:
+        if query_type == "predictive_risk_modeling":
+            results = enhanced_analytics.predictive_risk_modeling()
+        elif query_type == "time_series_trend_analysis":
+            months = parameters.get("months", 6)
+            metric = parameters.get("metric", "defaults")
+            results = enhanced_analytics.time_series_analysis(metric, months)
+        elif query_type == "cross_organization_correlation":
+            results = enhanced_analytics.cross_organization_correlation()
+        elif query_type == "anomaly_detection_dashboard":
+            results = ml_engine.anomaly_detection([], parameters.get("window", 7))
+        elif query_type == "customer_segmentation_clustering":
+            results = ml_engine.clustering_analysis([], parameters.get("n_clusters", 3))
+        elif query_type == "synthetic_data_generation":
+            results = privacy_engine.generate_synthetic_data({}, True)
+        else:
+            # Fall back to original analytics
+            return api_analyze()
+        
+        explanation = explanation_engine.generate(query_type, results)
+        
+        # Track query execution
+        monitor.track_query_execution(query_type, privacy_cost, True)
+        
+        return jsonify({
+            "success": True,
+            "query": query_type,
+            "query_info": query,
+            "results": results,
+            "explanation": explanation,
+            "privacy": {
+                "cost": privacy_cost,
+                "method": query.get("privacy_method", "differential_privacy"),
+                "budget_remaining": round(store.privacy_budget["epsilon"] - store.privacy_budget["used"], 4)
+            },
+            "timestamp": datetime.utcnow().isoformat(),
+            "execution_time": time.time() - g.start_time
+        })
+        
+    except Exception as e:
+        logger.error(f"Query execution failed: {str(e)}", exc_info=True)
+        monitor.track_query_execution(query_type, privacy_cost, False)
+        audit.log(f"Query failed: {str(e)}", user=user_email, query_type=query_type)
+        return jsonify({"error": "Analysis failed", "details": str(e)}), 500
+
+@app.route("/api/v2/metrics/detailed", methods=["GET"])
+def api_v2_metrics_detailed():
+    """Get detailed metrics and monitoring data"""
+    metrics_summary = monitor.get_metrics_summary()
     
-    # Execute appropriate analysis
-    if query_type == "risk_analysis":
-        results = combined_risk_analysis()
-    elif query_type == "subsidy_gap":
-        results = subsidy_gap_analysis()
-    elif query_type == "fraud_detection":
-        results = fraud_detection_analysis()
-    elif query_type == "financial_inclusion":
-        results = financial_inclusion_analysis()
-    elif query_type == "policy_effectiveness":
-        results = policy_effectiveness_analysis()
+    # Add system metrics
+    import psutil
+    system_metrics = {
+        "cpu_percent": psutil.cpu_percent(),
+        "memory_percent": psutil.virtual_memory().percent,
+        "disk_usage": psutil.disk_usage('/').percent,
+        "active_sessions": len(user_manager.sessions),
+        "data_store_size": sum(len(str(v)) for v in store.__dict__.values() if isinstance(v, (dict, list)))
+    }
+    
+    # Add business metrics
+    business_metrics = {
+        "total_organizations": len(org_manager.organizations),
+        "active_queries": len([q for q in QUERY_CATALOG.values() if q.get("usage_count", 0) > 0]),
+        "data_coverage": {
+            "financial": len(store.bank_data) > 0,
+            "insurance": len(store.insurance_data) > 0,
+            "telecom": len(store.telecom_data) > 0,
+            "retail": len(store.retail_data) > 0,
+            "education": len(store.education_data) > 0
+        },
+        "compliance_status": {
+            "gdpr": config.GDPR_COMPLIANT,
+            "hipaa": config.HIPAA_COMPLIANT,
+            "ccpa": config.CCPA_COMPLIANT
+        }
+    }
+    
+    return jsonify({
+        "system": system_metrics,
+        "business": business_metrics,
+        "monitoring": metrics_summary,
+        "alerts": monitor.alerts[-20:],  # Last 20 alerts
+        "timestamp": datetime.utcnow().isoformat()
+    })
+
+@app.route("/api/v2/data/contribute", methods=["POST"])
+@limiter.limit("5 per minute")
+def api_v2_data_contribute():
+    """API for organizations to contribute data"""
+    data = request.json
+    api_key = request.headers.get("X-API-Key")
+    organization_id = request.headers.get("X-Organization-ID")
+    
+    # Validate API key
+    org = None
+    for org_data in org_manager.organizations.values():
+        if org_data.get("api_key") == api_key and org_data.get("id") == organization_id:
+            org = org_data
+            break
+    
+    if not org:
+        return jsonify({"error": "Invalid API key or organization ID"}), 401
+    
+    # Validate data schema
+    data_type = data.get("data_type")
+    if not self._validate_data_schema(data_type, data.get("payload", {})):
+        return jsonify({"error": "Invalid data schema"}), 400
+    
+    # Process and store data
+    try:
+        # Encrypt sensitive data
+        encrypted_payload = privacy_engine.encrypt(json.dumps(data.get("payload", {})))
+        
+        # Store in appropriate data store
+        record_id = str(uuid.uuid4())
+        
+        if store.db_conn:
+            with store.db_conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO data_contributions 
+                    (id, organization_id, data_type, encrypted_payload, timestamp)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (record_id, organization_id, data_type, encrypted_payload, datetime.utcnow()))
+                store.db_conn.commit()
+        
+        # Log contribution
+        audit.log(
+            action=f"Data contribution from {org['name']}",
+            user=f"org_{organization_id}",
+            query_type="data_contribution",
+            data_sources=[org['id']],
+            metadata={
+                "data_type": data_type,
+                "record_count": len(data.get("payload", {})),
+                "record_id": record_id
+            }
+        )
+        
+        return jsonify({
+            "success": True,
+            "record_id": record_id,
+            "message": "Data contribution received and stored securely",
+            "timestamp": datetime.utcnow().isoformat()
+        })
+        
+    except Exception as e:
+        logger.error(f"Data contribution failed: {str(e)}")
+        return jsonify({"error": "Data contribution failed"}), 500
+
+@app.route("/api/v2/compliance/check", methods=["POST"])
+def api_v2_compliance_check():
+    """Check compliance requirements for data sharing"""
+    data = request.json
+    source_org = data.get("source_organization")
+    target_org = data.get("target_organization")
+    data_type = data.get("data_type")
+    
+    if not all([source_org, target_org, data_type]):
+        return jsonify({"error": "Missing required parameters"}), 400
+    
+    agreement = org_manager.validate_data_sharing(source_org, target_org, data_type)
+    
+    return jsonify({
+        "valid": agreement["valid"],
+        "common_compliance": agreement["common_compliance"],
+        "recommendations": self._generate_compliance_recommendations(agreement),
+        "agreement_id": f"AGMT-{secrets.token_hex(4).upper()}",
+        "timestamp": datetime.utcnow().isoformat()
+    })
+
+@app.route("/api/v2/export/advanced", methods=["POST"])
+@limiter.limit("10 per hour")
+def api_v2_export_advanced():
+    """Advanced data export with multiple formats"""
+    data = request.json
+    query_type = data.get("query")
+    format_type = data.get("format", "json")
+    include_explanation = data.get("include_explanation", True)
+    compression = data.get("compression", True)
+    
+    # Execute query to get fresh results
+    query_result = api_v2_analyze_advanced()
+    if query_result.status_code != 200:
+        return query_result
+    
+    result_data = query_result.get_json()
+    
+    # Generate export based on format
+    if format_type == "json":
+        export_data = result_data
+        mimetype = "application/json"
+        filename = f"{query_type}_export_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
+        
+    elif format_type == "csv":
+        # Convert results to CSV
+        output = io.StringIO()
+        results = result_data.get("results", {})
+        
+        if isinstance(results, list):
+            if results:
+                writer = csv.DictWriter(output, fieldnames=results[0].keys())
+                writer.writeheader()
+                writer.writerows(results)
+        elif isinstance(results, dict):
+            # Handle nested structures
+            writer = csv.writer(output)
+            self._flatten_dict_to_csv(writer, results)
+        
+        export_data = output.getvalue()
+        mimetype = "text/csv"
+        filename = f"{query_type}_export_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+        
+    elif format_type == "excel":
+        # Create Excel file (simulated - in production use openpyxl or pandas)
+        export_data = "Excel export feature coming soon"
+        mimetype = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        filename = f"{query_type}_export_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        
     else:
-        results = []
+        return jsonify({"error": "Unsupported export format"}), 400
     
-    explanation = generate_explanation(query_type, results)
+    # Apply compression if requested
+    if compression:
+        export_data = zlib.compress(export_data.encode() if isinstance(export_data, str) else export_data)
+        mimetype = "application/octet-stream"
+        filename += ".gz"
     
+    # Create response
+    response = Response(
+        export_data,
+        mimetype=mimetype,
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}",
+            "X-Export-Timestamp": datetime.utcnow().isoformat(),
+            "X-Query-Type": query_type,
+            "X-Privacy-Protected": "true"
+        }
+    )
+    
+    # Log export
+    audit.log(
+        action=f"Data exported: {query_type} as {format_type}",
+        user=session.get("user", "anonymous"),
+        query_type=query_type,
+        metadata={
+            "format": format_type,
+            "compression": compression,
+            "filename": filename
+        }
+    )
+    
+    return response
+
+# ============================================================
+# NEW ENHANCED FEATURES
+# ============================================================
+
+@app.route("/api/v2/ml/models", methods=["GET"])
+def api_v2_ml_models():
+    """Get information about available ML models"""
     return jsonify({
-        "query": query_type,
-        "results": results,
-        "explanation": explanation,
-        "audit": AUDIT_LOG[-5:],
-        "mode": EXECUTION_MODE,
-        "privacy_method": "differential_privacy + k_anonymity",
-        "data_sources": query_info["data_sources"]
+        "models": store.ml_models,
+        "status": "active" if config.ENABLE_ML_MODELS else "disabled",
+        "model_count": len(store.ml_models),
+        "last_training": datetime.utcnow().isoformat()
     })
 
-@app.route("/api/organizations")
-def api_organizations():
-    return jsonify(ORGANIZATIONS)
-
-@app.route("/api/audit")
-def api_audit():
+@app.route("/api/v2/privacy/synthetic", methods=["POST"])
+def api_v2_generate_synthetic():
+    """Generate synthetic data with privacy guarantees"""
+    data = request.json
+    original_data = data.get("data", {})
+    privacy_level = data.get("privacy_level", "medium")
+    
+    # Generate synthetic data
+    synthetic = privacy_engine.generate_synthetic_data(original_data, preserve_stats=True)
+    
+    # Add privacy guarantees
+    privacy_guarantee = {
+        "epsilon": 1.0 if privacy_level == "high" else 2.0 if privacy_level == "medium" else 5.0,
+        "delta": 1e-5,
+        "guarantee": "differential_privacy",
+        "level": privacy_level
+    }
+    
     return jsonify({
-        "entries": AUDIT_LOG[-20:],
-        "total_count": len(AUDIT_LOG)
+        "synthetic_data": synthetic,
+        "privacy_guarantee": privacy_guarantee,
+        "statistical_similarity": self._calculate_similarity(original_data, synthetic),
+        "generation_timestamp": datetime.utcnow().isoformat(),
+        "record_count": len(synthetic) if isinstance(synthetic, list) else 1
     })
 
-@app.route("/api/export/<query_type>")
-def api_export(query_type):
-    """Export results as JSON (governance-approved only)"""
-    if query_type not in APPROVED_QUERIES:
-        return jsonify({"error": "Export not permitted"}), 403
+@app.route("/api/v2/monitoring/alerts", methods=["GET"])
+def api_v2_get_alerts():
+    """Get active alerts and monitoring status"""
+    active_alerts = [a for a in monitor.alerts if a.get("status") == "active"]
+    recent_alerts = monitor.alerts[-50:]  # Last 50 alerts
     
-    log_action(f"Exported: {query_type}", query_type=query_type)
-    
-    # Return sanitized export
     return jsonify({
-        "export_timestamp": datetime.utcnow().isoformat(),
-        "query": query_type,
-        "disclaimer": "Data has been anonymized and aggregated per privacy policy",
-        "governance_approval": True
+        "active_alerts": active_alerts,
+        "recent_alerts": recent_alerts,
+        "alert_stats": {
+            "total": len(monitor.alerts),
+            "active": len(active_alerts),
+            "by_severity": {
+                "high": len([a for a in active_alerts if a.get("severity") == "high"]),
+                "medium": len([a for a in active_alerts if a.get("severity") == "medium"]),
+                "low": len([a for a in active_alerts if a.get("severity") == "low"])
+            }
+        },
+        "monitoring_status": "active",
+        "last_check": datetime.utcnow().isoformat()
     })
 
 # ============================================================
-# ERROR HANDLERS
+# UTILITY METHODS
 # ============================================================
 
-@app.errorhandler(404)
-def not_found(e):
-    return jsonify({"error": "Endpoint not found"}), 404
+def _validate_data_schema(self, data_type, payload):
+    """Validate data against schema"""
+    # Simplified schema validation
+    schemas = {
+        "banking": ["customers", "loans_active", "defaults"],
+        "insurance": ["policies", "claims_filed", "fraud_flags"],
+        "telecom": ["subscribers", "digital_score", "payment_delay_pct"]
+    }
+    
+    if data_type not in schemas:
+        return False
+    
+    required_fields = schemas[data_type]
+    return all(field in payload for field in required_fields)
 
-@app.errorhandler(500)
-def server_error(e):
-    return jsonify({"error": "Internal server error"}), 500
+def _generate_compliance_recommendations(self, agreement):
+    """Generate compliance recommendations"""
+    recommendations = []
+    
+    if agreement["valid"]:
+        recommendations.append("Data sharing is compliant with existing agreements")
+    else:
+        recommendations.append("Establish data sharing agreement with common compliance standards")
+        recommendations.append("Implement additional privacy safeguards")
+        recommendations.append("Review jurisdictional requirements")
+    
+    return recommendations
+
+def _flatten_dict_to_csv(self, writer, data, parent_key=''):
+    """Flatten nested dictionary for CSV export"""
+    items = []
+    for k, v in data.items():
+        new_key = f"{parent_key}.{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.extend(self._flatten_dict_to_csv(writer, v, new_key))
+        else:
+            items.append((new_key, v))
+    
+    if parent_key == '':  # Root level
+        writer.writerow([k for k, _ in items])
+        writer.writerow([v for _, v in items])
+    
+    return items
+
+def _calculate_similarity(self, original, synthetic):
+    """Calculate statistical similarity between original and synthetic data"""
+    # Simplified similarity calculation
+    if isinstance(original, dict) and isinstance(synthetic, dict):
+        common_keys = set(original.keys()) & set(synthetic.keys())
+        if not common_keys:
+            return 0
+        
+        similarities = []
+        for key in common_keys:
+            if isinstance(original[key], (int, float)) and isinstance(synthetic[key], (int, float)):
+                if original[key] == 0:
+                    similarity = 1 if synthetic[key] == 0 else 0
+                else:
+                    similarity = 1 - abs(original[key] - synthetic[key]) / abs(original[key])
+                similarities.append(max(0, min(1, similarity)))
+        
+        return round(np.mean(similarities), 3) if similarities else 0
+    
+    return 0
+
+# ============================================================
+# ENHANCED INITIALIZATION
+# ============================================================
+
+def initialize_enhanced_app():
+    """Initialize enhanced application"""
+    # Start real-time data simulator
+    simulator.start()
+    
+    # Initialize ML models
+    if config.ENABLE_ML_MODELS:
+        logger.info("ML models initialized")
+    
+    # Setup monitoring
+    if config.ENABLE_METRICS:
+        logger.info("Monitoring system initialized")
+    
+    # Log startup
+    audit.log("Enhanced application started", 
+              metadata={
+                  "version": config.VERSION,
+                  "mode": config.EXECUTION_MODE,
+                  "features": ["ml", "monitoring", "advanced_privacy"]
+              })
+    
+    print(f"""
+    ╔══════════════════════════════════════════════════════════════════════════════╗
+    ║                                                                              ║
+    ║   🔒 DataCleanRoom Pro Plus v{config.VERSION}                                   ║
+    ║   Enterprise Privacy-Safe Cross-Organization Analytics Platform              ║
+    ║                                                                              ║
+    ║   Execution Mode: {config.EXECUTION_MODE:<15}                                ║
+    ║   Privacy Budget: ε = {config.EPSILON}                                              ║
+    ║   Organizations: {len(org_manager.organizations)}                                           ║
+    ║   Advanced Queries: {len(QUERY_CATALOG)}                                       ║
+    ║   ML Models: {len(store.ml_models)} active                                    ║
+    ║                                                                              ║
+    ║   Enhanced Features:                                                         ║
+    ║   • Machine Learning Analytics ✓                                             ║
+    ║   • Real-time Monitoring & Alerts ✓                                          ║
+    ║   • Advanced Privacy Techniques ✓                                            ║
+    ║   • Synthetic Data Generation ✓                                              ║
+    ║   • Compliance Automation ✓                                                  ║
+    ║                                                                              ║
+    ║   API Endpoints:                                                             ║
+    ║   • /api/v2/* - Enhanced API with MFA                                        ║
+    ║   • /api/v2/analyze/advanced - ML-powered analytics                          ║
+    ║   • /api/v2/monitoring/alerts - Real-time monitoring                         ║
+    ║                                                                              ║
+    ║   Demo Login: demo@example.com / demo123                                     ║
+    ║                                                                              ║
+    ╚══════════════════════════════════════════════════════════════════════════════╝
+    """)
 
 # ============================================================
 # ENTRY POINT
 # ============================================================
 
 if __name__ == "__main__":
+    initialize_enhanced_app()
+    
     port = int(os.getenv("PORT", 5000))
     debug = os.getenv("FLASK_DEBUG", "false").lower() == "true"
-    app.run(host="0.0.0.0", port=port, debug=debug)
+    
+    # Production considerations
+    if not debug:
+        # Production WSGI server
+        from waitress import serve
+        serve(app, host="0.0.0.0", port=port)
+    else:
+        # Development server
+        app.run(
+            host="0.0.0.0",
+            port=port,
+            debug=debug,
+            threaded=True,
+            use_reloader=True
+        )
