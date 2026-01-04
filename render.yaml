@@ -1,8 +1,8 @@
 services:
   - type: web
-    name: datacleanroom-web
+    name: datacleanroom
     env: python
-    region: oregon  # or any region near you
+    region: oregon
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app
@@ -20,6 +20,8 @@ services:
         generateValue: true
       - key: JWT_SECRET
         generateValue: true
+      - key: ENCRYPTION_KEY
+        generateValue: true
     healthCheckPath: /api/health
     autoDeploy: true
 
@@ -33,7 +35,3 @@ services:
     plan: free
     databaseName: datacleanroom
     user: datacleanroom_user
-
-databases:
-  - name: datacleanroom-db
-    plan: free
